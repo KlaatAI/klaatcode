@@ -1,12 +1,12 @@
-<div align="center">
-<table><tr><td bgcolor="#1e1e1e">
-<br/>
-<a href="https://klaatai.com">
-<img src="https://klaatai.com/logos/Klaat_white.png" width="180" alt="KlaatAI Logo" />
-</a>
-<br/><br/>
-</td></tr></table>
-</div>
+<p align="center">
+  <a href="https://klaatai.com">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://klaatai.com/logos/Klaat_white.png" />
+      <source media="(prefers-color-scheme: light)" srcset="https://klaatai.com/logos/Klaat_black.png" />
+      <img src="https://klaatai.com/logos/Klaat_black.png" width="180" alt="KlaatAI Logo" />
+    </picture>
+  </a>
+</p>
 
 <h1 align="center">Klaat Code</h1>
 
