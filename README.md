@@ -456,6 +456,16 @@ Found a vulnerability? Please don't open a public issue — see [SECURITY.md](SE
 - Published SWE-bench Verified scores
 - Team-shared code graph, `klaat org` commands
 
+## Star History
+
+<a href="https://star-history.com/#KlaatAI/klaatcode&Date">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=KlaatAI/klaatcode&type=Date&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=KlaatAI/klaatcode&type=Date" />
+   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=KlaatAI/klaatcode&type=Date" width="600" />
+ </picture>
+</a>
+
 ## License
 
 Apache License 2.0 © KlaatAI — see [LICENSE](LICENSE).
