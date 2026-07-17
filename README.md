@@ -458,11 +458,11 @@ Found a vulnerability? Please don't open a public issue — see [SECURITY.md](SE
 
 ## Star History
 
-<a href="https://star-history.com/#KlaatAI/klaatcode&Date">
+<a href="https://www.star-history.com/?repos=klaatai%2Fklaatcode&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=KlaatAI/klaatcode&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=KlaatAI/klaatcode&type=Date" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=KlaatAI/klaatcode&type=Date" width="600" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=klaatai/klaatcode&type=date&theme=dark&legend=top-left&sealed_token=z26p3GukrR8K44NaQwv3UNcQfWfaB83sNtVR6cD26CuPiHdLDm4ViWI8Qjlnwr_uL7tOyLZiGgEvXqZ1zk-tihsEFT8RNz3uBt0hWexCtr4rTzgy43SJeEd3NaCAm86RkmwYr_Z-mk1QLH8HS0xBpAqsmqwDOt6tGvnor0VgYCOntfFlHTiMEEufwkQo" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=klaatai/klaatcode&type=date&legend=top-left&sealed_token=z26p3GukrR8K44NaQwv3UNcQfWfaB83sNtVR6cD26CuPiHdLDm4ViWI8Qjlnwr_uL7tOyLZiGgEvXqZ1zk-tihsEFT8RNz3uBt0hWexCtr4rTzgy43SJeEd3NaCAm86RkmwYr_Z-mk1QLH8HS0xBpAqsmqwDOt6tGvnor0VgYCOntfFlHTiMEEufwkQo" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=klaatai/klaatcode&type=date&legend=top-left&sealed_token=z26p3GukrR8K44NaQwv3UNcQfWfaB83sNtVR6cD26CuPiHdLDm4ViWI8Qjlnwr_uL7tOyLZiGgEvXqZ1zk-tihsEFT8RNz3uBt0hWexCtr4rTzgy43SJeEd3NaCAm86RkmwYr_Z-mk1QLH8HS0xBpAqsmqwDOt6tGvnor0VgYCOntfFlHTiMEEufwkQo" />
  </picture>
 </a>
 
