@@ -1,14 +1,28 @@
-# Klaat Code
+<p align="center">
+  <img src="https://klaatai.com/logos/Klaat_white.png" width="80" alt="KlaatAI Logo" />
+</p>
 
-> The terminal-native AI coding agent, powered by Klaatu-o1 smart model routing. Claude Code-grade accuracy, at a fraction of the cost — and it's reproducible, not a marketing claim.
+<h1 align="center">Klaat Code</h1>
+
+<p align="center">
+  <strong>The terminal-native AI coding agent, powered by Klaatu smart model routing.</strong><br/>
+  Claude Code-grade accuracy, at a fraction of the cost — and it's reproducible, not a marketing claim.
+</p>
+
+<p align="center">
 
 ```bash
 npm install -g klaatcode
 klaatcode
 ```
 
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![CI](https://github.com/KlaatAI/klaatcode/actions/workflows/klaatcode-ci.yml/badge.svg)](https://github.com/KlaatAI/klaatcode/actions)
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License: Apache 2.0" /></a>
+  <a href="https://github.com/KlaatAI/klaatcode/actions"><img src="https://github.com/KlaatAI/klaatcode/actions/workflows/klaatcode-ci.yml/badge.svg" alt="CI" /></a>
+  <a href="https://www.npmjs.com/package/klaatcode"><img src="https://img.shields.io/npm/v/klaatcode.svg?color=purple" alt="npm version" /></a>
+</p>
 
 ---
 
