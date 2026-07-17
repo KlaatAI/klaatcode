@@ -41,6 +41,7 @@
     "bench:claude": "bun bench/compare-claude.ts",
     "sync:public": "bash scripts/sync-to-public.sh",
     "sync:public:push": "bash scripts/sync-to-public.sh --push",
+    "pull:public": "bash scripts/pull-from-public.sh",
     "release": "bun run build && bun run build:binaries"
   },
   "dependencies": {

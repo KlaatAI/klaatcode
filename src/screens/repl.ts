@@ -67,6 +67,7 @@ import { readClipboardImage } from "../utils/clipboard-image.js";
 import { SessionLedger } from "../agent/session-ledger.js";
 import { COMPACTION_PROMPT, extractSummary, MAX_CONSECUTIVE_COMPACT_FAILURES } from "../agent/compaction-prompt.js";
 import { compactMessagesForApi } from "../agent/compaction.js";
+import { stripStrayTextToolCallArtifacts } from "../agent/text-tool-artifacts.js";
 import { drawWelcomeCard } from "./welcome-card.js";
 import {
   TIER_COSTS, VALID_TIERS, TIER_CONTEXT_WINDOW, SAFE_CONTEXT_BUDGET,
@@ -221,13 +222,12 @@ const META_TIPS = [
   "tip: @ to attach files",
   "tip: /compact to free context",
   "tip: Ctrl+B toggle sidebar",
-  "tip: /model heavy for complex tasks",
+  "tip: /tier heavy for complex tasks",
   "tip: /clear to reset session",
   "tip: /cost to see usage stats",
   "tip: /theme to change colors",
   "tip: /undo to revert last edit",
 ];
-
 
 // ─── runREPL ──────────────────────────────────────────────────────────────────
 
@@ -3083,9 +3083,9 @@ export async function runREPL(
 
         if (pendingToolCalls && pendingToolCalls.length > 0) {
           replState = "tool";
-          const cleanedToolText = (fullText || "")
-            .replace(/<(?:thinking|reasoning)>[\s\S]*?<\/(?:thinking|reasoning)>/g, "")
-            .trim();
+          const cleanedToolText = stripStrayTextToolCallArtifacts(
+            (fullText || "").replace(/<(?:thinking|reasoning)>[\s\S]*?<\/(?:thinking|reasoning)>/g, "")
+          ).trim();
           currentApiMessages = [
             ...currentApiMessages,
             { role: "assistant", content: cleanedToolText, tool_calls: pendingToolCalls },
@@ -3238,9 +3238,9 @@ export async function runREPL(
         // Extract <thinking> blocks from the response
         const thinkMatch = fullText.match(/<(?:thinking|reasoning)>([\s\S]*?)<\/(?:thinking|reasoning)>/);
         const thinkContent = thinkMatch ? thinkMatch[1]!.trim() : undefined;
-        const cleanContent = fullText
-          .replace(/<(?:thinking|reasoning)>[\s\S]*?<\/(?:thinking|reasoning)>/g, "")
-          .trim();
+        const cleanContent = stripStrayTextToolCallArtifacts(
+          fullText.replace(/<(?:thinking|reasoning)>[\s\S]*?<\/(?:thinking|reasoning)>/g, "")
+        ).trim();
 
         const assistantMsg: ChatMessage = {
           role: "assistant",
