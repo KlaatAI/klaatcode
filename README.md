@@ -30,6 +30,10 @@ klaatcode
   <a href="https://www.npmjs.com/package/klaatcode"><img src="https://img.shields.io/npm/v/klaatcode.svg?color=purple" alt="npm version" /></a>
 </p>
 
+<p align="center">
+  <img src="assets/klaatcode.gif" alt="KlaatCode CLI demo" width="720" />
+</p>
+
 ---
 
 ## What is KlaatAI?
