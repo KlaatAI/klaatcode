@@ -458,11 +458,12 @@ Found a vulnerability? Please don't open a public issue — see [SECURITY.md](SE
 
 ## Star History
 
+
 <a href="https://www.star-history.com/?repos=klaatai%2Fklaatcode&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=klaatai/klaatcode&type=date&theme=dark&legend=top-left&sealed_token=z26p3GukrR8K44NaQwv3UNcQfWfaB83sNtVR6cD26CuPiHdLDm4ViWI8Qjlnwr_uL7tOyLZiGgEvXqZ1zk-tihsEFT8RNz3uBt0hWexCtr4rTzgy43SJeEd3NaCAm86RkmwYr_Z-mk1QLH8HS0xBpAqsmqwDOt6tGvnor0VgYCOntfFlHTiMEEufwkQo" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=klaatai/klaatcode&type=date&legend=top-left&sealed_token=z26p3GukrR8K44NaQwv3UNcQfWfaB83sNtVR6cD26CuPiHdLDm4ViWI8Qjlnwr_uL7tOyLZiGgEvXqZ1zk-tihsEFT8RNz3uBt0hWexCtr4rTzgy43SJeEd3NaCAm86RkmwYr_Z-mk1QLH8HS0xBpAqsmqwDOt6tGvnor0VgYCOntfFlHTiMEEufwkQo" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=klaatai/klaatcode&type=date&legend=top-left&sealed_token=z26p3GukrR8K44NaQwv3UNcQfWfaB83sNtVR6cD26CuPiHdLDm4ViWI8Qjlnwr_uL7tOyLZiGgEvXqZ1zk-tihsEFT8RNz3uBt0hWexCtr4rTzgy43SJeEd3NaCAm86RkmwYr_Z-mk1QLH8HS0xBpAqsmqwDOt6tGvnor0VgYCOntfFlHTiMEEufwkQo" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=klaatai/klaatcode&type=date&theme=dark&legend=top-left&sealed_token=tKiAlOTi0cUO-Ec9BhxT4l7s3rfJwgeI0iLbDZHwMF14vL_VgtDm5H-q-zeOWxBsFEgmPpCx_czRMTlqF9yaTzOqp3vYOvBW4OWOMHk2oOugVYUBmZX7MWYBlKil7PygNNO8vIa_7nKB1Dn2vsYjylo9xcpulwu-M0QDOKypvOoQPIGStUq_miSM7kGE" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=klaatai/klaatcode&type=date&legend=top-left&sealed_token=tKiAlOTi0cUO-Ec9BhxT4l7s3rfJwgeI0iLbDZHwMF14vL_VgtDm5H-q-zeOWxBsFEgmPpCx_czRMTlqF9yaTzOqp3vYOvBW4OWOMHk2oOugVYUBmZX7MWYBlKil7PygNNO8vIa_7nKB1Dn2vsYjylo9xcpulwu-M0QDOKypvOoQPIGStUq_miSM7kGE" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=klaatai/klaatcode&type=date&legend=top-left&sealed_token=tKiAlOTi0cUO-Ec9BhxT4l7s3rfJwgeI0iLbDZHwMF14vL_VgtDm5H-q-zeOWxBsFEgmPpCx_czRMTlqF9yaTzOqp3vYOvBW4OWOMHk2oOugVYUBmZX7MWYBlKil7PygNNO8vIa_7nKB1Dn2vsYjylo9xcpulwu-M0QDOKypvOoQPIGStUq_miSM7kGE" />
  </picture>
 </a>
 
