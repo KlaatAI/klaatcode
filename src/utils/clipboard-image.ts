@@ -8,8 +8,10 @@
  *   - Linux:  wl-paste (Wayland) or xclip (X11)
  *   - Windows: PowerShell System.Windows.Forms.Clipboard
  *
- * Returns null when the clipboard has no image or the platform tool is
- * missing — callers treat that as "nothing to attach", never an error.
+ * Returns a tagged result so callers can distinguish "no image at all" from
+ * "image found but it exceeds the size cap" — the latter is a real, recoverable
+ * user error (full-screen Retina screenshots routinely blow past 8MB as PNG),
+ * so we surface it instead of silently treating it like an empty clipboard.
  */
 
 import { spawnSync } from "node:child_process";
@@ -17,14 +19,31 @@ import { readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+export const MAX_IMAGE_BYTES = 8 * 1024 * 1024; // API request-size guard
+
 export interface ClipboardImage {
   b64: string;
   mime: string;
 }
 
-const MAX_IMAGE_BYTES = 8 * 1024 * 1024; // API request-size guard
+export type ClipboardImageResult =
+  | { ok: true; image: ClipboardImage }
+  | { ok: false; reason: "empty" }
+  | { ok: false; reason: "too_large"; sizeBytes: number };
 
-function fromMac(): ClipboardImage | null {
+/** Build a "too_large" result for a buffer that exceeded the cap. */
+function tooLarge(sizeBytes: number): ClipboardImageResult {
+  return { ok: false, reason: "too_large", sizeBytes };
+}
+
+/** Wrap raw PNG bytes into a success result, or report it was too large. */
+function wrapPng(buf: Buffer): ClipboardImageResult | null {
+  if (!buf.length) return null;
+  if (buf.length > MAX_IMAGE_BYTES) return tooLarge(buf.length);
+  return { ok: true, image: { b64: buf.toString("base64"), mime: "image/png" } };
+}
+
+function fromMac(): ClipboardImageResult | null {
   // «data PNGf89504E47...» — AppleScript prints the PNG bytes as hex.
   const r = spawnSync("osascript", ["-e", "get the clipboard as «class PNGf»"], {
     encoding: "utf-8", timeout: 5_000, maxBuffer: 64 * 1024 * 1024,
@@ -32,12 +51,10 @@ function fromMac(): ClipboardImage | null {
   if (r.status !== 0 || !r.stdout) return null;
   const m = /«data PNGf([0-9A-Fa-f]+)»/.exec(r.stdout);
   if (!m) return null;
-  const buf = Buffer.from(m[1]!, "hex");
-  if (!buf.length || buf.length > MAX_IMAGE_BYTES) return null;
-  return { b64: buf.toString("base64"), mime: "image/png" };
+  return wrapPng(Buffer.from(m[1]!, "hex"));
 }
 
-function fromLinux(): ClipboardImage | null {
+function fromLinux(): ClipboardImageResult | null {
   for (const [cmd, args] of [
     ["wl-paste", ["-t", "image/png"]],
     ["xclip", ["-selection", "clipboard", "-t", "image/png", "-o"]],
@@ -45,14 +62,14 @@ function fromLinux(): ClipboardImage | null {
     const r = spawnSync(cmd, args as unknown as string[], {
       timeout: 5_000, maxBuffer: 64 * 1024 * 1024,
     });
-    if (r.status === 0 && r.stdout && r.stdout.length > 8 && r.stdout.length <= MAX_IMAGE_BYTES) {
-      return { b64: Buffer.from(r.stdout).toString("base64"), mime: "image/png" };
-    }
+    if (r.status !== 0 || !r.stdout || r.stdout.length <= 8) continue;
+    const res = wrapPng(r.stdout);
+    if (res) return res;
   }
   return null;
 }
 
-function fromWindows(): ClipboardImage | null {
+function fromWindows(): ClipboardImageResult | null {
   const tmp = join(tmpdir(), `klaatai-clip-${process.pid}.png`);
   const script =
     "Add-Type -AssemblyName System.Windows.Forms; " +
@@ -64,8 +81,7 @@ function fromWindows(): ClipboardImage | null {
   if (r.status !== 0 || !r.stdout?.includes("ok")) return null;
   try {
     const buf = readFileSync(tmp);
-    if (!buf.length || buf.length > MAX_IMAGE_BYTES) return null;
-    return { b64: buf.toString("base64"), mime: "image/png" };
+    return wrapPng(buf);
   } catch {
     return null;
   } finally {
@@ -73,15 +89,15 @@ function fromWindows(): ClipboardImage | null {
   }
 }
 
-export function readClipboardImage(): ClipboardImage | null {
+export function readClipboardImage(): ClipboardImageResult {
   try {
     switch (process.platform) {
-      case "darwin": return fromMac();
-      case "linux":  return fromLinux();
-      case "win32":  return fromWindows();
-      default:       return null;
+      case "darwin": return fromMac() ?? { ok: false, reason: "empty" };
+      case "linux":  return fromLinux() ?? { ok: false, reason: "empty" };
+      case "win32":  return fromWindows() ?? { ok: false, reason: "empty" };
+      default:       return { ok: false, reason: "empty" };
     }
   } catch {
-    return null;
+    return { ok: false, reason: "empty" };
   }
 }

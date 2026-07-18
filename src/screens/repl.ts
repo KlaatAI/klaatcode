@@ -63,7 +63,7 @@ import { resolveProjectId } from "../utils/project-id.js";
 import { MCPManager, loadMCPConfig, type MCPServerConfig } from "../mcp/client.js";
 import { seedSystemMessages, MODE_PROMPTS } from "../agent/system-prompt.js";
 import { checkForUpdate } from "../utils/update.js";
-import { readClipboardImage } from "../utils/clipboard-image.js";
+import { readClipboardImage, MAX_IMAGE_BYTES } from "../utils/clipboard-image.js";
 import { SessionLedger } from "../agent/session-ledger.js";
 import { COMPACTION_PROMPT, extractSummary, MAX_CONSECUTIVE_COMPACT_FAILURES } from "../agent/compaction-prompt.js";
 import { compactMessagesForApi } from "../agent/compaction.js";
@@ -4315,13 +4315,22 @@ export async function runREPL(
     // Attach a raw image from the OS clipboard (screenshots have no file
     // path, so they never arrive through the terminal's text paste).
     if (dialog.active) return;
-    const img = readClipboardImage();
-    if (!img) {
-      pushSystemMsg("No image on the clipboard. (Text pastes with cmd/ctrl+shift+v as usual.)");
+    const res = readClipboardImage();
+    if (!res.ok) {
+      if (res.reason === "too_large") {
+        const mb = (res.sizeBytes / (1024 * 1024)).toFixed(1);
+        const cap = (MAX_IMAGE_BYTES / (1024 * 1024)).toFixed();
+        pushSystemMsg(
+          `Clipboard image is ${mb}MB, over the ${cap}MB limit — try a smaller crop or window screenshot.`
+        );
+      } else {
+        pushSystemMsg("No image on the clipboard. (Text pastes with cmd/ctrl+shift+v as usual.)");
+      }
       chatLinesDirty = true;
       app.requestRender();
       return;
     }
+    const img = res.image;
     const n = pendingImages.length + 1;
     pendingImages.push({ path: `clipboard-${n}.png`, b64: img.b64, mime: img.mime });
     field.paste(`[Image: clipboard #${n}] `);
