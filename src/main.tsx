@@ -508,9 +508,10 @@ program
   .command("whoami")
   .description("Show current user info and backend status")
   .option("--base-url <url>", "API base URL override")
-  .action(async (opts: { baseUrl?: string }) => {
+  .option("--json", "Output machine-readable JSON")
+  .action(async (opts: { baseUrl?: string; json?: boolean }) => {
     const config = loadConfig();
-    await runWhoami(opts.baseUrl ?? config.baseUrl);
+    await runWhoami(opts.baseUrl ?? config.baseUrl, opts.json === true);
   });
 
 // ── klaatai serve ─────────────────────────────────────────────────────────────

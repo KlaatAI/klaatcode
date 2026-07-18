@@ -47,7 +47,7 @@ export async function runWhoami(baseUrl: string, json = false): Promise<void> {
     }
   } catch {
     if (json) {
-      console.log(JSON.stringify({ signedIn: true, email: null, plan: null, backend: "offline" }, null, 2));
+      console.error(JSON.stringify({ signedIn: true, email: null, plan: null, backend: "offline" }, null, 2));
     } else {
       console.error(chalk.red("  Could not reach KlaatAI API."));
     }
