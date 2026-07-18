@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import type { KlaatAIClient } from "../api/client.js";
+// Real modules captured BEFORE mock.module: bun module mocks are
+// process-global and leak into every other test file in the same run, so the
+// mocks below must re-export everything real and override only what this
+// file drives (client.test.ts previously lost static parseQuotaHeaders).
+import * as realCredentials from "./credentials.js";
+import * as realClient from "../api/client.js";
 
 // ── Mocks ──────────────────────────────────────────────────────────────────
 //
@@ -15,6 +21,7 @@ let mockCreds: Creds = {};
 let pingImpl: () => Promise<{ status: string }>;
 
 mock.module("../auth/credentials.js", () => ({
+  ...realCredentials,
   getAuthToken: () => mockToken,
   loadCredentials: () => mockCreds,
   saveCredentials: () => {},
@@ -22,9 +29,12 @@ mock.module("../auth/credentials.js", () => ({
 }));
 
 mock.module("../api/client.js", () => ({
-  KlaatAIClient: class {
-    constructor() {}
-    async ping(): Promise<{ status: string }> { return pingImpl(); }
+  ...realClient,
+  // Subclass so statics (parseQuotaHeaders, formatCost) stay available to
+  // other test files that receive this mock.
+  KlaatAIClient: class extends realClient.KlaatAIClient {
+    constructor() { super({ baseUrl: "http://mock.invalid" }); }
+    override async ping(): Promise<{ status: string }> { return pingImpl(); }
   },
 }));
 

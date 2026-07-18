@@ -46,6 +46,12 @@ export interface Config {
   diagnosticsCommands?: Record<string, string>;
   /** Third-party OpenAI-compatible models, selectable via /model (added with /model add). */
   customModels?: CustomModelConfig[];
+  /**
+   * Tier-aware toolset dialects: "auto" (default) trims the tool schema on
+   * cheap tiers (fast = core subset, pinned nano = no tools); "off" always
+   * sends the full set.
+   */
+  toolDialects?: "auto" | "off";
 }
 
 export interface CustomModelConfig {

@@ -58,3 +58,14 @@ test("leaves markdown code fences with unrelated angle brackets untouched", () =
 test("empty string in, empty string out", () => {
   expect(stripStrayTextToolCallArtifacts("")).toBe("");
 });
+
+test("strips <klaatu_creation> wrapper tags but keeps the inner content (web-prompt leak, 2026-07-19)", () => {
+  const input =
+    '<klaatu_creation lang="html" title="Project Structure">\n' +
+    "<pre>\nsrc/\n├── app/\n</pre>\n" +
+    "</klaatu_creation>";
+  const out = stripStrayTextToolCallArtifacts(input);
+  expect(out).not.toContain("klaatu_creation");
+  expect(out).toContain("src/");
+  expect(out).toContain("├── app/");
+});

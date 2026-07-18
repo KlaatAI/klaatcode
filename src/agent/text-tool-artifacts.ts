@@ -17,6 +17,16 @@ const FULL_BLOCK_RE =
   /<function(?:=[a-zA-Z0-9_]+|\s+name=["'][a-zA-Z0-9_]+["'])\s*>[\s\S]*?<\/function>/gi;
 const STRAY_TAG_RE = /<\/?(?:function|parameter|tool_call)(?:[^>]*)?>/gi;
 
+// Klaatu's web-chat pipeline instructs models to wrap generated apps in
+// <klaatu_creation lang="…" title="…"> markers for the web canvas. That
+// prompt must never reach an editor client, but a server misclassification
+// (seen live 2026-07-19: toolless request → web pipeline) leaks it into the
+// terminal. Strip the wrapper tags, keep the inner content.
+const CREATION_TAG_RE = /<\/?klaatu_creation(?:\s[^>]*)?>/gi;
+
 export function stripStrayTextToolCallArtifacts(text: string): string {
-  return text.replace(FULL_BLOCK_RE, "").replace(STRAY_TAG_RE, "");
+  return text
+    .replace(FULL_BLOCK_RE, "")
+    .replace(STRAY_TAG_RE, "")
+    .replace(CREATION_TAG_RE, "");
 }

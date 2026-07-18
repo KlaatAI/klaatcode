@@ -54,6 +54,7 @@ import {
 import { parsePatch } from "../tools/apply-patch.js";
 import { fuzzyScore } from "../engine/widgets/dialog.js";
 import { executeTools, TOOL_DEFINITIONS, configureSandbox } from "../tools/index.js";
+import { dialectForTier, toolsForDialect, dialectIncludesExtras, type ToolDialect } from "../tools/dialects.js";
 import { PluginRegistry } from "../tools/plugins.js";
 import { configureDiagnostics } from "../tools/diagnostics.js";
 import { killAllBackground } from "../tools/background.js";
@@ -299,6 +300,12 @@ export async function runREPL(
   let elapsedTimer: ReturnType<typeof setInterval> | null = null;
   let lastModel:    string             = "Auto";
   let lastTier:     string             = "smart";
+  // Tier-aware toolset dialect (8.1). Custom endpoints and the config kill
+  // switch always get the full set; otherwise pinned tier > last served tier.
+  const activeDialect = (tier?: string | null): ToolDialect =>
+    (config.toolDialects === "off" || client.customEndpoint)
+      ? "full"
+      : dialectForTier(tier ?? forceTier ?? lastTier);
   let lastClamp:    { from: string; to: string; why?: string } | null = null;
   let lastQuota:    QuotaSnapshot | null = null;
   let totalRequests = 0;
@@ -1485,7 +1492,12 @@ export async function runREPL(
     // delegation) and task_status too (the registry belongs to the parent);
     // MCP tools only for write-capable personas since their side effects are
     // unknown.
-    const builtIn = TOOL_DEFINITIONS.filter(t =>
+    // Dialect applies only when the persona has no explicit allowlist — a
+    // curated list (e.g. explore's impact_check on the fast tier) wins.
+    const subBase = persona.allowedTools === null
+      ? toolsForDialect(activeDialect(args.tier ?? persona.tier), TOOL_DEFINITIONS)
+      : TOOL_DEFINITIONS;
+    const builtIn = subBase.filter(t =>
       t.function.name !== "delegate_task" &&
       t.function.name !== "task_status" &&
       (persona.allowedTools === null || persona.allowedTools.includes(t.function.name)));
@@ -1746,6 +1758,7 @@ export async function runREPL(
             `Reason:  ${friendlyReason}`,
             `Tokens:  ${lastMeta.usage.prompt_tokens}↑ ${lastMeta.usage.completion_tokens}↓`,
             `Cost:    ${lastMeta.cost}`,
+            `Tools:   ${activeDialect()} dialect (${toolsForDialect(activeDialect(), TOOL_DEFINITIONS).length} built-in)`,
           ].join("\n"));
         } else {
           pushSystemMsg("No request made yet.");
@@ -2342,7 +2355,7 @@ export async function runREPL(
           }
 
           // Tools
-          lines.push(`● Tools          — ${TOOL_DEFINITIONS.length} built-in + ${mcpManager.toolDefinitions.length} MCP`);
+          lines.push(`● Tools          — ${TOOL_DEFINITIONS.length} built-in + ${mcpManager.toolDefinitions.length} MCP (active dialect: ${activeDialect()}, ${toolsForDialect(activeDialect(), TOOL_DEFINITIONS).length} sent)`);
 
           // Project rules
           const rulesExist = existsSync(join(projectRoot, ".klaatai", "rules.md"));
@@ -2990,15 +3003,20 @@ export async function runREPL(
 
     try {
       const planMode = tabs.activeTab.label === "Plan";
+      // Dialect fixed per turn from the tier we expect to be served (pinned
+      // or last seen). Plan mode keeps its own read-only set — the server's
+      // plan cascade picks the tier there.
+      const dialect = activeDialect();
       const tools: ToolDefinition[] = opts.noTools ? [] : planMode
         ? [
             ...TOOL_DEFINITIONS.filter(t => PLAN_READONLY_TOOLS.has(t.function.name)),
             EXIT_PLAN_TOOL,
           ]
         : [
-            ...TOOL_DEFINITIONS,
-            ...mcpManager.toolDefinitions,
-            ...pluginRegistry.toolDefinitions,
+            ...toolsForDialect(dialect, TOOL_DEFINITIONS),
+            ...(dialectIncludesExtras(dialect)
+              ? [...mcpManager.toolDefinitions, ...pluginRegistry.toolDefinitions]
+              : []),
           ];
       let fullText = "";
       let currentApiMessages = [...newApiMessages];
