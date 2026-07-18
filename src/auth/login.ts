@@ -16,9 +16,19 @@ export function runLogout(): void {
 }
 
 /** Run the `klaatai whoami` command. */
-export async function runWhoami(baseUrl: string): Promise<void> {
+export async function runWhoami(baseUrl: string, json = false): Promise<void> {
   const token = getAuthToken();
   if (!token) {
+    if (json) {
+      console.log(
+        JSON.stringify(
+          { signedIn: false, email: null, plan: null, backend: "unknown" },
+          null,
+          2,
+        ),
+      );
+      return;
+    }
     console.log(chalk.yellow("  Not signed in. Run: klaatai login"));
     return;
   }
@@ -26,6 +36,22 @@ export async function runWhoami(baseUrl: string): Promise<void> {
   try {
     const info = await client.ping();
     const creds = loadCredentials();
+    const backend = info.status === "ok" ? "online" : "offline";
+    if (json) {
+      console.log(
+        JSON.stringify(
+          {
+            signedIn: true,
+            email: creds.email ?? null,
+            plan: creds.plan ?? null,
+            backend,
+          },
+          null,
+          2,
+        ),
+      );
+      return;
+    }
     console.log();
     if (creds.email) console.log(chalk.bold("  Account:  ") + creds.email);
     if (creds.plan)  console.log(chalk.bold("  Plan:     ") + creds.plan);
@@ -33,6 +59,22 @@ export async function runWhoami(baseUrl: string): Promise<void> {
     console.log(chalk.bold("  Backend:  ") + (info.status === "ok" ? chalk.green("Online") : chalk.red("Offline")));
     console.log();
   } catch {
+    if (json) {
+      const creds = loadCredentials();
+      console.log(
+        JSON.stringify(
+          {
+            signedIn: true,
+            email: creds.email ?? null,
+            plan: creds.plan ?? null,
+            backend: "unreachable",
+          },
+          null,
+          2,
+        ),
+      );
+      return;
+    }
     console.error(chalk.red("  Could not reach KlaatAI API."));
   }
 }
