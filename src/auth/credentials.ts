@@ -106,7 +106,11 @@ export function loadConfig(): Config {
     if (!existsSync(CONFIG_FILE)) return { ...DEFAULT_CONFIG };
     const raw = JSON.parse(readFileSync(CONFIG_FILE, "utf-8"));
     return { ...DEFAULT_CONFIG, ...raw };
-  } catch {
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    process.stderr.write(
+      `Warning: failed to parse ${CONFIG_FILE} (${detail}); using defaults.\n`,
+    );
     return { ...DEFAULT_CONFIG };
   }
 }
