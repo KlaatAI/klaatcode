@@ -36,8 +36,14 @@ function tooLarge(sizeBytes: number): ClipboardImageResult {
   return { ok: false, reason: "too_large", sizeBytes };
 }
 
-/** Wrap raw PNG bytes into a success result, or report it was too large. */
-function wrapPng(buf: Buffer): ClipboardImageResult | null {
+/**
+ * Wrap raw PNG bytes into a success result, or report it was too large.
+ *
+ * Exported (pure, no IO) so the size-discrimination logic can be unit-tested
+ * without mocking `node:child_process` (mocking that module globally breaks
+ * other test files that import `spawn`).
+ */
+export function wrapPng(buf: Buffer): ClipboardImageResult | null {
   if (!buf.length) return null;
   if (buf.length > MAX_IMAGE_BYTES) return tooLarge(buf.length);
   return { ok: true, image: { b64: buf.toString("base64"), mime: "image/png" } };
