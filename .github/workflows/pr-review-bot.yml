@@ -84,20 +84,20 @@ jobs:
           fi
 
           {
-            echo "pr_title<<'EOF_TITLE'"
+            echo "pr_title<<EOF_TITLE"
             echo "$PR_TITLE"
             echo "EOF_TITLE"
-            echo "pr_body<<'EOF_BODY'"
+            echo "pr_body<<EOF_BODY"
             echo "$PR_BODY"
             echo "EOF_BODY"
-            echo "issue_json<<'EOF_ISSUE'"
+            echo "issue_json<<EOF_ISSUE"
             echo "$ISSUE_JSON"
             echo "EOF_ISSUE"
-            echo "diff<<'EOF_DIFF'"
+            echo "diff<<EOF_DIFF"
             echo "$DIFF"
             echo "EOF_DIFF"
             echo "diff_truncated=$DIFF_TRUNCATED"
-            echo "files<<'EOF_FILES'"
+            echo "files<<EOF_FILES"
             echo "$FILES"
             echo "EOF_FILES"
             echo "has_test_file=$HAS_TEST_FILE"
@@ -151,7 +151,7 @@ jobs:
             echo "review_text=" >> "$GITHUB_OUTPUT"
           else
             {
-              echo "review_text<<'EOF_REVIEW'"
+              echo "review_text<<EOF_REVIEW"
               echo "$REVIEW_TEXT"
               echo "EOF_REVIEW"
             } >> "$GITHUB_OUTPUT"
