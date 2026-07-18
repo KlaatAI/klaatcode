@@ -17,11 +17,6 @@ mock.module("node:child_process", () => ({
   },
 }));
 
-mock.module("node:fs", () => ({
-  readFileSync: () => (nextSpawn?.stdout ?? Buffer.alloc(0)),
-  rmSync: () => {},
-}));
-
 const { readClipboardImage, MAX_IMAGE_BYTES } =
   await import("./clipboard-image.js") as {
     readClipboardImage: () =>
