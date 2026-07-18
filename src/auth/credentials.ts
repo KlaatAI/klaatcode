@@ -8,6 +8,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
+import chalk from "chalk";
 
 const KLAATAI_DIR = join(homedir(), ".klaatai");
 const CREDENTIALS_FILE = join(KLAATAI_DIR, "credentials.json");
@@ -106,7 +107,13 @@ export function loadConfig(): Config {
     if (!existsSync(CONFIG_FILE)) return { ...DEFAULT_CONFIG };
     const raw = JSON.parse(readFileSync(CONFIG_FILE, "utf-8"));
     return { ...DEFAULT_CONFIG, ...raw };
-  } catch {
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(
+      chalk.yellow(
+        `⚠ Failed to parse ${CONFIG_FILE}: ${message}. Falling back to default config.`,
+      ),
+    );
     return { ...DEFAULT_CONFIG };
   }
 }
