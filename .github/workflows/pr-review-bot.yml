@@ -130,7 +130,7 @@ jobs:
             "$PR_TITLE" "$PR_BODY" "$ISSUE_NUM" "$ISSUE_JSON" "$FILES" "$HAS_TEST_FILE" "$DIFF_TRUNCATED" "$DIFF")
 
           PAYLOAD=$(jq -n --arg sys "$SYSTEM_PROMPT" --arg usr "$USER_PROMPT" '{
-            model: "klaatu-reason",
+            model: "klaatu",
             messages: [
               {role: "system", content: $sys},
               {role: "user", content: $usr}
