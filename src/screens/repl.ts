@@ -319,6 +319,20 @@ export async function runREPL(
   let vimInsert  = true;  // true = INSERT mode, false = NORMAL mode
   let vimPendingD = false; // next key completes a 'd' motion (dd/dw/d$)
   let vimPendingG = false; // next key completes a 'g' motion (gg)
+  let vimYank = ""; // last deleted text for p/P (unnamed register)
+
+  /** Capture text removed by a field edit (before → after) into the vim yank slot. */
+  const yankDeleted = (before: string) => {
+    const after = field.value;
+    if (before.length <= after.length) return;
+    if (after.length === 0) {
+      vimYank = before;
+      return;
+    }
+    let i = 0;
+    while (i < after.length && before[i] === after[i]) i++;
+    vimYank = before.slice(i, i + (before.length - after.length));
+  };
 
   // ─── Routing analytics — per-tier request counts for the session ──────────
   const tierCounts: Map<string, number> = new Map();
@@ -1900,6 +1914,7 @@ export async function runREPL(
           "  w/e/b         — word forward/forward/back",
           "  0/$           — start/end of line",
           "  x             — delete char under cursor",
+          "  p/P           — paste last delete after/before cursor",
           "  i/a/A/I       — enter INSERT mode (cursor/after/end-of-line/start-of-line)",
           "  d then d/w/$  — delete line/word/to-end",
           "  D             — delete to end of line",
@@ -2049,7 +2064,7 @@ export async function runREPL(
           chatLinesDirty = true;
           pushSystemMsg(
             vimMode
-              ? "Vim mode **enabled**.\n\n`Esc` → NORMAL · `i/a/A/I` → INSERT · `h/j/k/l` move · `w/b/e` word · `0/$` line · `x` delete · `dd` clear · `D` kill-to-end · `gg`/`G` scroll chat · `ctrl+d`/`ctrl+u` half-page\n\n`/vimmode off` to disable."
+              ? "Vim mode **enabled**.\n\n`Esc` → NORMAL · `i/a/A/I` → INSERT · `h/j/k/l` move · `w/b/e` word · `0/$` line · `x` delete · `p`/`P` paste · `dd` clear · `D` kill-to-end · `gg`/`G` scroll chat · `ctrl+d`/`ctrl+u` half-page\n\n`/vimmode off` to disable."
               : "Vim mode **disabled**.",
           );
           app.requestRender();
@@ -4661,9 +4676,19 @@ export async function runREPL(
       if (vimPendingD) {
         vimPendingD = false;
     if (replState === "idle") {
-          if (ch === "d")  field.handleKey(mk("ctrl+u", { ctrl: true }), { singleLine: true }); // dd: clear input
-          else if (ch === "w") field.handleKey(mk("ctrl+w", { ctrl: true }), { singleLine: true }); // dw
-          else if (ch === "$") field.handleKey(mk("ctrl+k", { ctrl: true }), { singleLine: true }); // d$
+          if (ch === "d") {
+            const before = field.value;
+            field.handleKey(mk("ctrl+u", { ctrl: true }), { singleLine: true }); // dd: clear input
+            yankDeleted(before);
+          } else if (ch === "w") {
+            const before = field.value;
+            field.handleKey(mk("ctrl+w", { ctrl: true }), { singleLine: true }); // dw
+            yankDeleted(before);
+          } else if (ch === "$") {
+            const before = field.value;
+            field.handleKey(mk("ctrl+k", { ctrl: true }), { singleLine: true }); // d$
+            yankDeleted(before);
+          }
         }
         app.requestRender();
         return;
@@ -4702,9 +4727,28 @@ export async function runREPL(
           case "b": field.handleKey(mk("alt+left",  { alt: true }), { singleLine: true }); app.requestRender(); return;
           case "0": field.handleKey(mk("home"),       { singleLine: true }); app.requestRender(); return;
           case "$": field.handleKey(mk("end"),        { singleLine: true }); app.requestRender(); return;
-          case "x": field.handleKey(mk("delete"),     { singleLine: true }); app.requestRender(); return;
-          case "D": field.handleKey(mk("ctrl+k", { ctrl: true }), { singleLine: true }); app.requestRender(); return;
+          case "x": {
+            const before = field.value;
+            field.handleKey(mk("delete"), { singleLine: true });
+            yankDeleted(before);
+            app.requestRender(); return;
+          }
+          case "D": {
+            const before = field.value;
+            field.handleKey(mk("ctrl+k", { ctrl: true }), { singleLine: true });
+            yankDeleted(before);
+            app.requestRender(); return;
+          }
           case "d": vimPendingD = true; return;
+          case "p":
+            if (vimYank) {
+              field.handleKey(mk("right"), { singleLine: true });
+              field.paste(vimYank);
+            }
+            app.requestRender(); return;
+          case "P":
+            if (vimYank) field.paste(vimYank);
+            app.requestRender(); return;
           // Mode switches
           case "i": vimInsert = true; chatLinesDirty = true; app.requestRender(); return;
           case "a":
