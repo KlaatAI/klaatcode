@@ -69,6 +69,10 @@ function commandFor(absPath: string, projectRoot: string): string[] | null {
     if (onPath("gofmt")) return ["gofmt", "-e", "-l", absPath]; // -e reports syntax errors
     return null;
   }
+  if (ext === ".rb") {
+    if (onPath("rubocop")) return ["rubocop", "--format", "emacs", "--no-color", absPath];
+    return null;
+  }
   if (ext === ".rs") {
     // cargo check is whole-crate/slow — only via explicit config override.
     return null;
