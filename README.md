@@ -62,6 +62,8 @@ What's new in each release: [CHANGELOG.md](CHANGELOG.md).
 
 Same 33 fixtures, same prompts, same verify command, run against KlaatCode, Claude Code, opencode, Cursor, and Grok Build in one harness. Full methodology and honesty notes: [`bench/README.md`](bench/README.md). Interactive version with per-task drill-down: [klaatai.com/benchmarks](https://klaatai.com/benchmarks).
 
+[![Cumulative benchmark cost — Klaat Code vs Claude Code, Cursor, and opencode](bench/promo/bench-curve-github.png)](https://klaatai.com/benchmarks)
+
 Latest run — 2026-07-19, 33 tasks:
 
 | Metric | Klaat Code | Claude Code (Sonnet 5) | opencode (Nemotron 3 Ultra) | Cursor (Composer 2.5 Fast) |
