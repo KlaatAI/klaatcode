@@ -328,6 +328,27 @@ export const MIDNIGHT_PALETTE: ThemePalette = {
   assistantFg:  117,  // sky blue
 };
 
+/** Tokyo Night — deep navy with cool blue and green accents */
+export const TOKYO_NIGHT_PALETTE: ThemePalette = {
+  accent:       "#7aa2f7",  // blue
+  dimText:      "#7f87b2",  // dark foreground
+  userColor:    "#9ece6a",  // green
+  border:       "#3b4261",  // terminal black
+  thumb:        "#545c7e",
+  bg:           null,
+  inputBg:      234,
+  chatFg:       189,  // pale blue-white
+  mutedFg:      103,  // muted lavender-blue
+  toolFg:       110,  // cyan-blue
+  codeFg:       111,  // bright blue
+  codeBg:       235,
+  headingFg:    "white",
+  sidebarLabel: 103,
+  sidebarValue: 189,
+  userFg:       149,  // green
+  assistantFg:  111,  // blue
+};
+
 export type Theme =
   | "dark"
   | "light"
@@ -341,11 +362,12 @@ export type Theme =
   | "ember"
   | "matrix"
   | "cobalt"
-  | "midnight";
+  | "midnight"
+  | "tokyo-night";
 
 export const THEME_NAMES: Theme[] = [
   "dark", "light", "dracula", "nord", "ayu", "catppuccin", "gruvbox",
-  "neon", "synthwave", "ember", "matrix", "cobalt", "midnight",
+  "neon", "synthwave", "ember", "matrix", "cobalt", "midnight", "tokyo-night",
 ];
 
 export const THEME_DESCRIPTIONS: Record<Theme, string> = {
@@ -362,6 +384,7 @@ export const THEME_DESCRIPTIONS: Record<Theme, string> = {
   matrix:     "Matrix — green phosphor terminal aesthetic",
   cobalt:     "Cobalt — deep blue with golden highlights",
   midnight:   "Midnight — indigo depths with sky blue & lavender",
+  "tokyo-night": "Tokyo Night — deep navy with cool blue & green",
 };
 
 export function getPalette(theme: Theme): ThemePalette {
@@ -378,6 +401,7 @@ export function getPalette(theme: Theme): ThemePalette {
     case "matrix":     return MATRIX_PALETTE;
     case "cobalt":     return COBALT_PALETTE;
     case "midnight":   return MIDNIGHT_PALETTE;
+    case "tokyo-night": return TOKYO_NIGHT_PALETTE;
     default:           return DARK_PALETTE;
   }
 }
@@ -446,4 +470,3 @@ export async function detectTheme(): Promise<Theme> {
     timer = setTimeout(() => finish("dark"), 200);
   });
 }
-
