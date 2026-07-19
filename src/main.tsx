@@ -387,6 +387,7 @@ async function runHeadless(opts: {
   baseUrl?: string;
   model?: string;
   system?: string;
+  maxCost?: string;
 }): Promise<void> {
   const config  = loadConfig();
   const baseUrl = opts.baseUrl ?? config.baseUrl;
@@ -410,10 +411,25 @@ async function runHeadless(opts: {
   }
   messages.push({ role: "user", content: opts.prompt });
 
+  // 9.4: --max-cost guard for CI/cron use — abort once reported usage crosses it.
+  const maxCost = opts.maxCost ? Number(opts.maxCost) : 0;
+  let runCost = 0;
+  const RUN_TIER_COSTS: Record<string, [number, number]> = {
+    nano: [0.10, 0.20], fast: [0.25, 0.75], code: [0.50, 1.50],
+    reason: [1.00, 3.00], heavy: [2.50, 8.00],
+  };
+
   try {
     for await (const chunk of client.chatStream(messages, { tier: opts.model })) {
       if (chunk.type === "token" && chunk.text) {
         process.stdout.write(chunk.text);
+      } else if (chunk.type === "metadata" && chunk.metadata && chunk.usage) {
+        const [inp, out] = RUN_TIER_COSTS[chunk.metadata.tier] ?? [0.5, 1.5];
+        runCost += (chunk.usage.prompt_tokens * inp + chunk.usage.completion_tokens * out) / 1_000_000;
+        if (maxCost > 0 && runCost >= maxCost) {
+          process.stderr.write(`\nStopped: --max-cost $${maxCost} reached ($${runCost.toFixed(4)} spent).\n`);
+          process.exit(3);
+        }
       } else if (chunk.type === "error") {
         process.stderr.write(`\nError: ${chunk.error}\n`);
         process.exit(1);
@@ -432,8 +448,9 @@ program
   .option("--base-url <url>", "API base URL override")
   .option("--model <tier>", "Force routing tier (nano/fast/code/reason/heavy)")
   .option("--system <text>", "Prepend a system message before the prompt")
+  .option("--max-cost <usd>", "Abort when estimated cost reaches this USD amount (exit code 3)")
   .action(async (promptArg: string | undefined, opts: {
-    baseUrl?: string; model?: string; system?: string;
+    baseUrl?: string; model?: string; system?: string; maxCost?: string;
   }) => {
     // Support piped stdin: klaatai run - (or klaatai run with stdin piped)
     let prompt = promptArg;

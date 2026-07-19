@@ -66,6 +66,22 @@ export class SessionLedger {
     this.append(text);
   }
 
+  /** Pre-compaction snapshot of critical state (9.6) — the recovery source a
+   * later model reads when a compaction check reports possible context loss. */
+  sessionState(state: { taskIntent: string | null; files: string[] }): void {
+    if (!this.enabled) return;
+    try {
+      const lines = [
+        `\n## Session state (pre-compaction ${new Date().toISOString().slice(0, 16)})`,
+        "",
+        `Task intent: ${state.taskIntent ?? "(none captured)"}`,
+        state.files.length ? `Files modified: ${state.files.join(", ")}` : "Files modified: (none)",
+        "",
+      ];
+      appendFileSync(this.path, lines.join("\n"), "utf-8");
+    } catch { /* best-effort */ }
+  }
+
   compacted(summary: string): void {
     if (!this.enabled) return;
     try {

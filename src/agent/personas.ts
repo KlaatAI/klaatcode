@@ -28,6 +28,7 @@ export interface Persona {
 const READ_ONLY_TOOLS = [
   "read_file", "list_dir", "glob", "grep",
   "file_outline", "project_graph_query", "project_semantic_search", "impact_check",
+  "plan_exploration",
   "web_fetch", "web_search", "todo_read",
 ];
 

@@ -52,6 +52,17 @@ export interface Config {
    * sends the full set.
    */
   toolDialects?: "auto" | "off";
+  /** Tool-output noise filter (progress bars, passing-test spam, dupes): "on" (default) or "off". */
+  outputFilter?: "on" | "off";
+  /** Attention-ordered old-context arrangement ("lost in the middle"): "on" (default) or "off". */
+  attentionOrder?: "on" | "off";
+  /**
+   * Burn-rate guard: pause the agent loop and ask when estimated session cost
+   * crosses this many USD (0/undefined = off). Headless `run` has --max-cost.
+   */
+  maxSessionCost?: number;
+  /** Per-phase soft token budgets (9.5): "on" (default) or "off". */
+  phaseBudgets?: "on" | "off";
 }
 
 export interface CustomModelConfig {

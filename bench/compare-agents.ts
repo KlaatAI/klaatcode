@@ -8,15 +8,24 @@
  *   opencode  — opencode headless (`opencode run … --format json`), NDJSON
  *               events; tokens/cost summed from step-finish events. Model
  *               pinned to its as-shipped default (opencode/big-pickle, free).
+ *               Promotional-free models (e.g. nemotron-3-ultra-free) report
+ *               $0 — cost is ESTIMATED at the model's PAID published rates so
+ *               the comparison reflects what the tokens would really cost.
  *   grok      — Grok Build headless (`grok -p … --output-format json`);
  *               reports usage but NOT cost (subscription) — cost is ESTIMATED
  *               from tokens at published grok-4.5 API prices, marked "est".
+ *   cursor    — Cursor CLI headless (`cursor-agent -p … --output-format json`);
+ *               requires `cursor-agent` installed + logged in. Cost estimated
+ *               at published Composer 2.5 standard rates when the CLI does
+ *               not report it. UNVERIFIED adapter — flags per cursor.com/docs/cli.
  *
  * Usage:
  *   bun bench/compare-agents.ts --agent opencode
  *   bun bench/compare-agents.ts --agent grok --only fix-fizzbuzz
  *   bun bench/compare-agents.ts --agent claude --from <id>   # resume
- *   bun bench/compare-agents.ts --agent opencode --model opencode/big-pickle
+ *   bun bench/compare-agents.ts --agent claude --model claude-sonnet-5
+ *   bun bench/compare-agents.ts --agent opencode --model opencode/nemotron-3-ultra-free
+ *   bun bench/compare-agents.ts --agent cursor --model composer-2.5
  *
  * Report: bench/reports/<agent>-<stamp>.json — same shape as run.ts /
  * compare-claude.ts reports; diff with bench/compare-summary.ts.
@@ -120,6 +129,17 @@ const claudeAdapter: Adapter = {
   },
 };
 
+/**
+ * Published PAID rates (USD per 1M tokens) for models served free promotionally.
+ * A $0 bill on a promo model says nothing about real-world cost — estimate at
+ * the paid rate and mark the report estimated. Cache-read billed at the input
+ * rate (no published discount).
+ * Nemotron 3 Ultra: openrouter.ai/nvidia/nemotron-3-ultra-550b-a55b (2026-07).
+ */
+const PROMO_MODEL_PAID_PRICES: Array<{ match: RegExp; input: number; output: number; cacheRead: number }> = [
+  { match: /nemotron-3-ultra/i, input: 0.50, output: 2.20, cacheRead: 0.50 },
+];
+
 const opencodeAdapter: Adapter = {
   name: "opencode",
   // As-shipped default: opencode's free zen model. Pinned for reproducibility.
@@ -157,6 +177,15 @@ const opencodeAdapter: Adapter = {
     }
     if (r.status !== 0) m.error = `opencode exited ${r.status ?? "signal"}`;
     else if (m.turns === 0) m.error = "no step-finish events parsed";
+    // Promo-free model: replace the $0 bill with an estimate at paid rates.
+    const promo = PROMO_MODEL_PAID_PRICES.find(p => p.match.test(model ?? ""));
+    if (promo && m.costUsd === 0) {
+      m.costEstimated = true;
+      m.costUsd =
+        (m.promptTokens * promo.input +
+         m.cacheReadTokens * promo.cacheRead +
+         m.completionTokens * promo.output) / 1_000_000;
+    }
     return m;
   },
 };
@@ -212,10 +241,78 @@ const grokAdapter: Adapter = {
   },
 };
 
+// Composer 2.5 standard rates (USD per 1M tokens) — cursor.com/docs/models
+// (2026-07: $0.50 in / $2.50 out; the -fast tier is $3/$15). Used only when
+// the CLI does not report cost. Cache-read billed at input rate (no published
+// discount).
+const COMPOSER_PRICES = { input: 0.50, output: 2.50, cacheRead: 0.50 };
+
+/**
+ * Cursor CLI adapter — UNVERIFIED (no cursor-agent on the dev machine).
+ * Flags per cursor.com/docs/cli: `-p` print mode, `--output-format json`
+ * (single JSON object on completion), `--force` auto-approves edits/commands
+ * (safe: throwaway workspace), `--model composer-2.5`.
+ * Verify the JSON field names on the first real run before citing numbers.
+ */
+const cursorAdapter: Adapter = {
+  name: "cursor",
+  defaultModel: "composer-2.5",
+  run(prompt, cwd, model) {
+    const m: AgentMetrics = { costUsd: 0, turns: 0, model: model ?? "default", promptTokens: 0, completionTokens: 0, cacheReadTokens: 0, cacheCreateTokens: 0 };
+    const probe = spawnSync("cursor-agent", ["--version"], { encoding: "utf-8", timeout: 10_000 });
+    if (probe.error || probe.status !== 0) {
+      m.error = "cursor-agent not installed — install via `curl https://cursor.com/install -fsS | bash` and log in";
+      return m;
+    }
+    const args = [
+      "-p", prompt,
+      "--output-format", "json",
+      "--force",
+    ];
+    if (model) args.push("--model", model);
+    const r = spawnSync("cursor-agent", args, { cwd, encoding: "utf-8", timeout: TASK_TIMEOUT_MS, env: envFor(cwd) });
+    try {
+      // Docs: json format emits one object at completion. Field names mirror
+      // the claude-style schema; parse defensively and fall back to estimates.
+      const out = JSON.parse(r.stdout || "{}") as {
+        total_cost_usd?: number; cost_usd?: number; num_turns?: number;
+        is_error?: boolean; subtype?: string; error?: string;
+        usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number };
+        model?: string;
+      };
+      m.turns = out.num_turns ?? 0;
+      m.promptTokens = out.usage?.input_tokens ?? 0;
+      m.completionTokens = out.usage?.output_tokens ?? 0;
+      m.cacheReadTokens = out.usage?.cache_read_input_tokens ?? 0;
+      m.cacheCreateTokens = out.usage?.cache_creation_input_tokens ?? 0;
+      if (out.model) m.model = out.model;
+      const reported = out.total_cost_usd ?? out.cost_usd;
+      if (reported !== undefined) {
+        m.costUsd = reported;
+      } else {
+        m.costEstimated = true;
+        m.costUsd =
+          (m.promptTokens * COMPOSER_PRICES.input +
+           m.cacheReadTokens * COMPOSER_PRICES.cacheRead +
+           m.completionTokens * COMPOSER_PRICES.output) / 1_000_000;
+      }
+      if (out.is_error) m.error = out.error ?? out.subtype ?? "cursor reported error";
+      if (!m.error && m.promptTokens === 0 && m.completionTokens === 0) {
+        m.error = "cursor CLI reported no usage — inspect raw output before trusting cost";
+      }
+    } catch {
+      m.error = `unparseable cursor output (exit ${r.status})`;
+    }
+    if (r.status !== 0 && !m.error) m.error = `cursor exited ${r.status}`;
+    return m;
+  },
+};
+
 const ADAPTERS: Record<string, Adapter> = {
   claude: claudeAdapter,
   opencode: opencodeAdapter,
   grok: grokAdapter,
+  cursor: cursorAdapter,
 };
 
 // ─── Runner ───────────────────────────────────────────────────────────────────

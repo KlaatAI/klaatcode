@@ -37,3 +37,33 @@ test("parseQuotaHeaders ignores non-numeric unit values", () => {
   expect(q!.unitsUsed).toBeUndefined();
   expect(q!.plan).toBe("free");
 });
+
+// ─── 9.4 retry contract + loop signal ────────────────────────────────────────
+
+test("retryDelayMs: X-KlaatAI-Retry no → never retry", () => {
+  expect(KlaatAIClient.retryDelayMs(new Headers({ "X-KlaatAI-Retry": "no" }), 502)).toBeNull();
+  // "no" wins even on a 429 that carries Retry-After
+  expect(KlaatAIClient.retryDelayMs(
+    new Headers({ "X-KlaatAI-Retry": "no", "Retry-After": "5" }), 429)).toBeNull();
+});
+
+test("retryDelayMs: after-<s> schedules one retry", () => {
+  expect(KlaatAIClient.retryDelayMs(new Headers({ "X-KlaatAI-Retry": "after-3" }), 503)).toBe(3000);
+  expect(KlaatAIClient.retryDelayMs(new Headers({ "X-KlaatAI-Retry": "after-0.5" }), 503)).toBe(500);
+});
+
+test("retryDelayMs: bare 429 falls back to Retry-After", () => {
+  expect(KlaatAIClient.retryDelayMs(new Headers({ "Retry-After": "7" }), 429)).toBe(7000);
+  // non-429 without a hint → no retry
+  expect(KlaatAIClient.retryDelayMs(new Headers({ "Retry-After": "7" }), 500)).toBeNull();
+  // absent/garbage headers → no retry
+  expect(KlaatAIClient.retryDelayMs(new Headers(), 429)).toBeNull();
+  expect(KlaatAIClient.retryDelayMs(new Headers({ "X-KlaatAI-Retry": "banana" }), 429)).toBeNull();
+});
+
+test("parseQuotaHeaders surfaces X-KlaatAI-Loop-Signal", () => {
+  const q = KlaatAIClient.parseQuotaHeaders(
+    new Headers({ "X-KlaatAI-Loop-Signal": "tool_repetition:3" }));
+  expect(q).not.toBeNull();
+  expect(q!.loopSignal).toBe("tool_repetition:3");
+});

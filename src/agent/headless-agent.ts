@@ -32,7 +32,7 @@ export interface HeadlessResult {
   tiers: Record<string, number>;
   lastModel: string;
   elapsedMs: number;
-  stoppedBy: "done" | "max_turns" | "error";
+  stoppedBy: "done" | "max_turns" | "max_cost" | "loop" | "error";
   error?: string;
 }
 
@@ -40,6 +40,9 @@ export interface HeadlessOptions {
   tools?: ToolDefinition[];
   tier?: string;
   maxTurns?: number;
+  /** Hard USD cap (9.4) — the loop stops with stoppedBy "max_cost" when
+   * reported + estimated cost reaches it. Essential for CI/cron use. */
+  maxCostUsd?: number;
   /** Wall-clock in ms from a monotonic clock the caller controls (test-safe). */
   now: () => number;
   /** Optional per-token / per-tool progress sink (bench prints a dot). */
@@ -72,14 +75,24 @@ export async function runHeadlessAgent(
   };
 
   let apiMessages = [...messages];
+  let loopRefusals = 0; // 9.4: consecutive doom-loop refusal rounds
 
   try {
     while (res.turns < maxTurns) {
+      // 9.4: hard cost cap for unattended runs.
+      if (opts.maxCostUsd && res.costUsd + res.estCostUsd >= opts.maxCostUsd) {
+        res.stoppedBy = "max_cost";
+        res.error = `cost cap $${opts.maxCostUsd} reached ($${(res.costUsd + res.estCostUsd).toFixed(4)} spent)`;
+        res.partialUsage = res.usageEvents < res.requests;
+        res.elapsedMs = opts.now() - started;
+        return res;
+      }
       if (apiMessages.length > 8) apiMessages = compactMessagesForApi(apiMessages);
 
       let fullText = "";
       let pendingToolCalls: ToolCall[] | null = null;
       let gotUsage = false;
+      let loopSignal: { count: number; results_identical?: boolean } | null = null;
       res.requests += 1; // one chatStream call per loop iteration
       // ~4 chars/token — used ONLY to fill in requests where the server sent no
       // usage chunk (intermediate tool-turns often don't), so multi-turn runs
@@ -105,6 +118,7 @@ export async function runHeadlessAgent(
           res.lastModel = chunk.metadata.model ?? res.lastModel;
           const [inp, out] = TIER_COST[tier] ?? [0.5, 1.5];
           res.costUsd += (chunk.usage.prompt_tokens * inp + chunk.usage.completion_tokens * out) / 1_000_000;
+          loopSignal = chunk.metadata.loop_signal ?? null;
         } else if (chunk.type === "error") {
           res.stoppedBy = "error";
           res.error = chunk.error;
@@ -132,6 +146,28 @@ export async function runHeadlessAgent(
         res.turns += 1;
         opts.onProgress?.({ kind: "turn" });
         apiMessages = [...apiMessages, { role: "assistant", content: cleaned, tool_calls: pendingToolCalls }];
+
+        // 9.4: doom-loop reaction — refuse identical repeated rounds, stop
+        // entirely after 3 refusals (headless has no user to intervene).
+        if (loopSignal?.results_identical) {
+          loopRefusals++;
+          if (loopRefusals >= 3) {
+            res.stoppedBy = "loop";
+            res.error = "doom loop: model repeated the same tool round despite recovery guidance";
+            res.partialUsage = res.usageEvents < res.requests;
+            res.elapsedMs = opts.now() - started;
+            return res;
+          }
+          const guidance =
+            `Refused: doom-loop detected — this exact tool round already ran ${loopSignal.count}+ times ` +
+            `with identical results. Do NOT repeat it; change approach or finish with your best answer.`;
+          for (const tc of pendingToolCalls) {
+            apiMessages = [...apiMessages, { role: "tool", content: guidance, tool_call_id: tc.id }];
+          }
+          continue;
+        }
+        loopRefusals = 0;
+
         for (const tc of pendingToolCalls) {
           const out = await executeTools(tc, projectRoot, client);
           res.toolCalls += 1;

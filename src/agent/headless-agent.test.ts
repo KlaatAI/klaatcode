@@ -71,3 +71,52 @@ test("respects maxTurns when the model keeps calling tools", async () => {
   expect(r.turns).toBe(3);
   expect(r.toolCalls).toBe(3);
 });
+
+// ─── 9.4 budget guards + doom-loop reaction ──────────────────────────────────
+
+test("maxCostUsd stops the loop with stoppedBy max_cost", async () => {
+  // Every turn reports ~$0.0105 of heavy usage and asks for another tool call.
+  const costlyToolTurn: StreamChunk[] = [
+    { type: "tool_call", tool_calls: [{ id: "t", type: "function", function: { name: "todo_read", arguments: "{}" } }] },
+    { type: "metadata", usage: { prompt_tokens: 3_000, completion_tokens: 375, total_tokens: 3_375 },
+      metadata: { tier: "heavy", model: "m", reason: "", provider: "p", cascade_position: 0 } },
+    { type: "done" },
+  ];
+  const client = fakeClient([costlyToolTurn]);
+  const r = await runHeadlessAgent(client, user, "/tmp", {
+    tools: [], now: clock(), maxTurns: 50, maxCostUsd: 0.02,
+  });
+  expect(r.stoppedBy).toBe("max_cost");
+  expect(r.error).toContain("cost cap");
+  expect(r.costUsd).toBeGreaterThanOrEqual(0.02);
+  expect(r.turns).toBeLessThan(5); // stopped early, nowhere near maxTurns
+});
+
+test("doom-loop signal refuses the round and stops after 3 refusals", async () => {
+  const loopingTurn: StreamChunk[] = [
+    { type: "tool_call", tool_calls: [{ id: "t", type: "function", function: { name: "grep", arguments: "{\"pattern\":\"x\"}" } }] },
+    { type: "metadata", usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+      metadata: { tier: "code", model: "m", reason: "", provider: "p", cascade_position: 0,
+        loop_signal: { kind: "tool_repetition", count: 4, results_identical: true } } },
+    { type: "done" },
+  ];
+  const client = fakeClient([loopingTurn]);
+  const r = await runHeadlessAgent(client, user, "/tmp", { tools: [], now: clock(), maxTurns: 50 });
+  expect(r.stoppedBy).toBe("loop");
+  expect(r.error).toContain("doom loop");
+  expect(r.toolCalls).toBe(0); // refused rounds never executed the tool
+});
+
+test("weak loop signal (results differ) does not refuse execution", async () => {
+  const weakSignalTurn: StreamChunk[] = [
+    { type: "tool_call", tool_calls: [{ id: "t", type: "function", function: { name: "todo_read", arguments: "{}" } }] },
+    { type: "metadata", usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+      metadata: { tier: "code", model: "m", reason: "", provider: "p", cascade_position: 0,
+        loop_signal: { kind: "tool_repetition", count: 3, results_identical: false } } },
+    { type: "done" },
+  ];
+  const client = fakeClient([weakSignalTurn]);
+  const r = await runHeadlessAgent(client, user, "/tmp", { tools: [], now: clock(), maxTurns: 3 });
+  expect(r.stoppedBy).toBe("max_turns"); // tools kept executing normally
+  expect(r.toolCalls).toBe(3);
+});

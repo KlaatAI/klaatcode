@@ -33,7 +33,7 @@ Needs auth: `klaatai login` first, or `KLAATAI_API_KEY=...`.
 The report JSON is written incrementally after every task — a mid-suite abort
 (daily quota, ctrl-c) still leaves a usable partial report (`"complete": false`).
 
-## Tasks (30)
+## Tasks (33)
 
 Each task is a self-contained fixture dir with failing tests the agent must make
 pass **without editing the test file**. Categories:
@@ -44,10 +44,9 @@ pass **without editing the test file**. Categories:
 | `implement` | 13 | implement a function/class from a stub + spec comment (LRU cache, event emitter, query string, JSON pointer, expression evaluator, …) |
 | `multi-file` | 3 | the failing test is not where the fix is — cross-file navigation (implement imported module, bug in dependency, missing export) |
 | `refactor` | 1 | behavior-preserving API change (callback → Promise) |
-| `long-context` | 2 | large fixtures where navigation is the task: `longctx-cross-module-bug` (~30-file codebase, bug 3 modules from the failing test — exercises code-graph/search efficiency) and `longctx-shared-tax-rate` (wide mechanical fix across 8 feature modules) |
+| `long-context` | 5 | large ~30-file fixtures where navigation is the task: cross-module bug hunts, a wide mechanical fix across 8 feature modules, stale cache keys, wrong metric arguments, config precedence — exercises code-graph/search efficiency |
 
-Difficulty spread: 10 easy · 16 medium · 4 hard (`implement-json-pointer`,
-`implement-expression-eval`, `longctx-cross-module-bug`, plus multi-file navigation).
+Difficulty spread: 10 easy · 18 medium · 5 hard.
 
 ## Suite integrity — selfcheck (run after any task change)
 
@@ -67,8 +66,33 @@ hold or the task is broken. CI-safe.
 3. Add an entry to `suite.json` (`id`, `dir`, `prompt`, `difficulty`, `category`).
 4. `bun run bench:selfcheck` — must report ✓ for your task.
 
-## Comparing against Claude Code
+## Comparing against other agents
 
-Run the same task prompts through Claude Code (or any agent) over the same
-fixtures, capture its token/cost totals, and diff the two report JSONs. Keep the
-fixture set identical so the only variable is the agent + routing.
+`compare-agents.ts` runs the identical suite through competing CLIs — same
+fixtures, same prompts, same verify command; the only variable is the agent:
+
+```bash
+bun bench/compare-agents.ts --agent claude   --model claude-sonnet-5
+bun bench/compare-agents.ts --agent opencode --model opencode/nemotron-3-ultra-free
+bun bench/compare-agents.ts --agent grok
+bun bench/compare-agents.ts --agent cursor   # needs cursor-agent CLI + login
+bun bench/compare-agents.ts --agent <a> --from <task-id>   # resume after abort
+```
+
+Honesty rules baked into the harness: promo-free models are priced at their
+published paid rates; subscription CLIs that report no dollars get token-based
+estimates marked `~`; rate-limited tasks are marked invalid samples (rerun
+later with `--from`), never counted as failures.
+
+### Cursor IDE-chat lane
+
+When `cursor-agent` (headless CLI) is unusable, `cursor-ide-bench.ts` runs the
+lane through the Cursor IDE's own agent chat: `prepare` builds a workspace of
+all 33 tasks plus a paste-prompt and an objective `run-check.sh` referee;
+`import --cost <usd> --tokens <n>` converts the results (cost/tokens from the
+Cursor dashboard's on-demand usage delta) into a normal report JSON, tagged
+with its single-session methodology.
+
+Latest results table + interactive per-task drill-down:
+[klaatai.com/benchmarks](https://klaatai.com/benchmarks) (regenerated from
+`bench/reports/` via `bun bench/export-benchmarks-json.ts`).

@@ -47,30 +47,38 @@ klaatcode
 
 ## What is Klaat Code, and how is it different?
 
-Klaat Code is this repo: a terminal-native coding agent you install once and run in any project. It reads your code, edits files, runs commands, and verifies its own work — asking permission before anything risky. Functionally it sits in the same category as **Claude Code**, **opencode**, **Codex CLI**, and **Aider** — same agentic loop, same terminal-first philosophy — but three things are genuinely different:
+Klaat Code is this repo: a terminal-native coding agent you install once and run in any project. It reads your code, edits files, runs commands, and verifies its own work — asking permission before anything risky. Functionally it sits in the same category as **Claude Code**, **opencode**, **Codex CLI**, and **Aider** — same agentic loop, same terminal-first philosophy — but six things are genuinely different:
 
 1. **Smart per-request model routing.** None of the above route per-message to a cost tier the way Klaatu does. You get frontier-level reasoning when a task needs it and pay nano/fast prices for everything else, automatically — not a model you pick once per session.
-2. **A real code knowledge graph**, not just grep. Your project is indexed into a call graph with semantic search; the agent queries symbols, callers, callees, and blast-radius instead of reading whole files — typically 5–15× fewer tokens per task.
-3. **The comparison is reproducible.** The [benchmark below](#benchmarks) isn't a claim — clone this repo, run `bun run bench`, and verify the numbers yourself against the same fixtures we used.
+2. **A real code knowledge graph**, not just grep. Your project is indexed into a call graph with semantic search; the agent queries symbols, callers, callees, and blast-radius instead of reading whole files — and `plan_exploration` uses that graph to plan the optimal file-read order *before* reading anything. Typically 5–15× fewer tokens per task.
+3. **No Continue button, ever.** Claude Code and Windsurf stop every 20 tool calls and make you click Continue; on Klaatu, tool rounds are free and unlimited — only your messages count against quota. And when a loop is genuinely *stuck* (same call, same args, same result), the server detects it and the CLI breaks it with recovery guidance instead of billing you for repetition.
+4. **Cost you can see and cap.** Real-time burn-rate monitoring (warns at 3× your session average), per-task cost attribution, per-phase token budgets that catch a stuck agent *before* it burns your budget exploring, a hard session cap, and `--max-cost` for CI. No other CLI watches spend rate.
+5. **Context that knows what it forgot.** Compaction in every CLI silently loses things; Klaat Code snapshots your task and files before compacting, verifies the summary afterwards, and tells the model exactly what was lost and where to recover it. `/context` shows what's in the window vs. compacted away. Tool output is noise-filtered (progress bars, passing-test spam) before it ever costs you tokens.
+6. **The comparison is reproducible.** The [benchmark below](#benchmarks) isn't a claim — clone this repo, run `bun run bench`, and verify the numbers yourself against the same fixtures we used.
+
+What's new in each release: [CHANGELOG.md](CHANGELOG.md).
 
 ## Benchmarks
 
-Same 30 fixtures, same prompts, same verify command, run against KlaatCode, Claude Code, opencode, and Grok Build in one harness. Full methodology and honesty notes: [`bench/README.md`](bench/README.md).
+Same 33 fixtures, same prompts, same verify command, run against KlaatCode, Claude Code, opencode, Cursor, and Grok Build in one harness. Full methodology and honesty notes: [`bench/README.md`](bench/README.md). Interactive version with per-task drill-down: [klaatai.com/benchmarks](https://klaatai.com/benchmarks).
 
-| Metric | Klaat Code | Claude Code |
-|---|---|---|
-| Solved | 30/30 | 30/30 |
-| Cost per solved task | **$0.026** | $0.146 |
-| Cost ratio | **18%** | (ref) |
-| Tokens per solved task | 28% | (ref) |
+Latest run — 2026-07-19, 33 tasks:
 
-Equal accuracy, ~5.5× cheaper. Reproduce it:
+| Metric | Klaat Code | Claude Code (Sonnet 5) | opencode (Nemotron 3 Ultra) | Cursor (Composer 2.5 Fast) |
+|---|---|---|---|---|
+| Solved | **33/33** | 33/33 | 31/33 | 33/33 |
+| Cost per solved task | **$0.027** | $0.146 | ~$0.048 est | ~$0.094 est |
+| Tokens per solved task | **51.7K** | 171.5K | 89.1K | ~28.9K |
+
+**5.4× cheaper than Claude Code, 1.8× cheaper than the nearest competitor, at a perfect solve rate.** Promo-free and subsidized lanes are normalized to published per-token rates so the comparison reflects real token cost (details in the honesty notes). Grok Build's refresh on this suite is pending an API rate-limit window; on the previous 30-task suite it solved 30/30 at ~$0.058 est.
+
+Reproduce it:
 
 ```bash
 git clone https://github.com/KlaatAI/klaatcode.git && cd klaatcode
 bun install
 bun run bench                              # klaatcode
-bun bench/compare-agents.ts --agent claude # or opencode / grok
+bun bench/compare-agents.ts --agent claude # or opencode / grok / cursor
 ```
 
 ---
@@ -184,6 +192,7 @@ Switch to Plan mode (`Tab`) and the model gets only read-only tools — it resea
 | `ask_user` | The agent can ask you a blocking multiple-choice question mid-task |
 | `delegate_task` | Spawn a sub-agent for a scoped piece of work, optionally in the background |
 | `task_status` | Check on or list background sub-agents |
+| `plan_exploration` | Plan the optimal file-read order for a task from the code graph — before reading anything |
 | `project_graph_query` | Query the code graph: symbols, callers, callees |
 | `project_semantic_search` | Meaning-based code search (Pro) |
 | `file_outline` | Symbol outline of a file without reading it all |
@@ -207,10 +216,23 @@ Sub-agents can also run **in the background** (`background: true`): you keep cha
 Long sessions stay affordable without losing the thread:
 
 - **Every request** is mechanically compacted: thinking blocks stripped, stale tool output truncated by usefulness (superseded file reads and consumed search results trimmed hardest), oldest turns dropped last.
+- **Command output is noise-filtered before it enters context**: progress bars collapse to their final frame, passing-test runs collapse to a count, repeated lines dedupe — failures and summaries always kept in full.
+- **Older history is attention-ordered**: the most relevant surviving turns sit at the start and end of the window, where models actually attend ("lost in the middle" mitigation). Recent turns and the system prompt never move.
 - **Compaction budget scales to your active tier's context window** — a session pinned to `nano` compacts harder than one on `heavy`, so requests never overflow the smaller model's window.
 - **Automatic summarization** kicks in past the budget: the session is summarized on the cheapest tier into task state, files touched, and decisions, then the conversation continues seamlessly.
-- `/compact` triggers it manually; the sidebar shows context-window fill so you're never surprised.
+- **Compaction self-check**: critical state (your task, the files being modified) is snapshotted before summarizing and verified after — if the summary dropped something, a recovery note tells the model what it forgot and where to re-read it. No other CLI detects context loss.
+- `/compact` triggers it manually; `/context` shows what's in the window vs. compacted away; the sidebar shows context-window fill so you're never surprised.
 - Code-graph tools mean the agent rarely needs whole files in context in the first place.
+
+### Cost Guards & Runaway Protection
+
+The viral horror stories — $6,500 overnight bills, agents looping on the same failing call — can't happen here:
+
+- **Burn-rate monitor**: warns when spend runs 3× your session average (a loop or an oversized context, caught live).
+- **Per-task cost + phase breakdown** in `/cost`: see what each request cost and where the tokens went (explore / implement / verify).
+- **Per-phase budgets**: exploration that burns its budget without producing a single edit pauses and asks — the stuck-agent signature, caught before the bill.
+- **Hard caps**: `maxSessionCost` in config pauses agent rounds at your limit; `klaatcode run --max-cost 0.50` for CI/cron (exit code 3).
+- **Doom-loop breaker**: the server flags identical repeated tool rounds; the CLI refuses them, injects recovery guidance, and stops after three strikes — while *productive* tool loops stay unlimited and free.
 
 ### Sessions
 
@@ -307,7 +329,8 @@ This README covers the highlights. For every shell flag, slash command, config k
 | `/tier [name]` | Lock a Klaatu routing tier, or open the picker |
 | `/model` | Switch between Klaatu and custom third-party models |
 | `/why` | Explain last routing decision |
-| `/cost` | Session cost + savings |
+| `/cost` | Session cost, burn rate, per-task + per-phase breakdown |
+| `/context` | What's in the context window vs. compacted away |
 | `/compact` | Summarize context to free the window |
 | `/diff [file]` · `/review [ref]` · `/commit` | Git workflows |
 | `/undo` · `/checkpoint [label]` · `/rollback [id]` | Safety nets |
@@ -412,6 +435,10 @@ klaatcode serve --port 4200
 | `sandbox` | `project` / `off` | Write sandbox scope |
 | `diagnostics` | `on` / `off` | Post-edit typecheck/lint feedback loop |
 | `customModels` | array | Third-party OpenAI-compatible models (see `/model add`) |
+| `outputFilter` | `on` / `off` | Noise-filter command output (progress bars, passing-test spam) before it costs tokens |
+| `attentionOrder` | `on` / `off` | Arrange old history so the most relevant turns sit where models attend |
+| `maxSessionCost` | USD number | Hard session cost cap — pauses agent rounds when reached |
+| `phaseBudgets` | `on` / `off` | Per-phase token budgets; pause a stuck explore phase before it burns the budget |
 
 Full reference, incl. every config key: [klaatai.com/docs/configuration](https://klaatai.com/docs/configuration).
 

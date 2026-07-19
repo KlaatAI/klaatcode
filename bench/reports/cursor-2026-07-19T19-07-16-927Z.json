@@ -1,0 +1,35 @@
+{
+  "suite": "klaatcode-bench-v2",
+  "agent": "cursor",
+  "model": "composer-2.5",
+  "when": "2026-07-19T19-07-16-927Z",
+  "complete": true,
+  "runs": 1,
+  "costEstimated": true,
+  "solved": 0,
+  "total": 1,
+  "planned": 1,
+  "totalCostUsd": 0,
+  "totalTokens": 0,
+  "tasks": [
+    {
+      "id": "fix-fizzbuzz",
+      "difficulty": "easy",
+      "category": "bugfix",
+      "passed": false,
+      "promptTokens": 0,
+      "completionTokens": 0,
+      "totalTokens": 0,
+      "cacheReadTokens": 0,
+      "cacheCreateTokens": 0,
+      "turns": 0,
+      "costUsd": 0,
+      "costEstimated": true,
+      "model": "composer-2.5",
+      "elapsedMs": 600396,
+      "error": "cursor CLI reported no usage — inspect raw output before trusting cost",
+      "runs": 1,
+      "passes": 0
+    }
+  ]
+}

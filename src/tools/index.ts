@@ -29,6 +29,8 @@ import { runDiagnostics } from "./diagnostics.js";
 import { parsePatch } from "./apply-patch.js";
 import { extractSymbols } from "./regex-symbols.js";
 import { startBackground, readBackground, killBackground } from "./background.js";
+import { filterCommandOutput } from "./output-filter.js";
+import { buildPlan, renderPlan, type GraphAccess } from "./exploration-planner.js";
 import { resolveProjectId } from "../utils/project-id.js";
 import {
   localDbQuery, localDbFileSymbols, localDbCallers, localDbSemanticSearch,
@@ -536,7 +538,9 @@ function runCommand(args: RunCommandArgs, projectRoot: string): string {
     if (!out) out = "(no output)";
 
     const header = exitCode !== 0 ? `[exit ${exitCode}]\n` : "";
-    return persistOversized(header + out, "command");
+    // 9.1: strip progress/duplicate/passing-test noise BEFORE the oversize
+    // check — filtered output often fits where raw would spill to disk.
+    return persistOversized(header + filterCommandOutput(out), "command");
   } catch (e) {
     return `Error running command: ${e instanceof Error ? e.message : String(e)}`;
   }
@@ -739,7 +743,7 @@ async function graphQuery(
   if (local.length > 0) return _fmtLocalSymbols(local);
 
   // Server — enforces Pro plan.
-  if (!client) return `No symbols found for "${query}". Run "klaatai reindex" to build the local graph, or sign in for server-side search.`;
+  if (!client) return `No symbols found for "${query}". indexing runs automatically when the TUI opens this project — wait for the sidebar graph status, or sign in for server-side search.`;
 
   try {
     const res = await client.graphQuery(proj.id, query, kind, limit);
@@ -747,7 +751,7 @@ async function graphQuery(
       return "Graph search requires a Pro plan. Upgrade at klaatai.com/pricing.";
     }
     if (res.status === 404) {
-      return `Graph not found for this project. Run "klaatai reindex" to index it first.`;
+      return `Graph not found for this project. indexing runs automatically at TUI startup — it may still be in progress (see sidebar).`;
     }
     if (!res.ok) {
       return `Graph query failed. Please try again.`;
@@ -795,7 +799,7 @@ async function fileOutline(
     return `Outline for ${filePath}:\n${lines.join("\n")}`;
   }
 
-  if (!client) return `File '${filePath}' not in local index. Run "klaatai reindex" to build the graph.`;
+  if (!client) return `File '${filePath}' not in local index. indexing runs automatically at TUI startup and may still be in progress.`;
 
   try {
     const res = await client.graphOutline(proj.id, filePath);
@@ -833,7 +837,7 @@ async function impactCheck(
     return lines.join("\n");
   }
 
-  if (!client) return `No callers found for "${symbol}" in local index. Run "klaatai reindex" first.`;
+  if (!client) return `No callers found for "${symbol}" in local index. indexing runs automatically at TUI startup and may still be in progress.`;
 
   try {
     const res = await client.graphImpact(proj.id, symbol, args.file);
@@ -867,7 +871,7 @@ async function semanticSearch(
   if (!query) return "project_semantic_search: \"query\" argument is required";
 
   const proj = resolveProjectId(projectRoot);
-  if (!proj) return "project_semantic_search: no project indexed yet — run \"klaatai reindex\" first.";
+  if (!proj) return "project_semantic_search: no project indexed yet — indexing runs automatically at TUI startup and may still be in progress.";
 
   if (!client) return "project_semantic_search: not authenticated — run \"klaatai login\" first.";
 
@@ -887,6 +891,33 @@ async function semanticSearch(
     return lines.join("\n");
   } catch (e) {
     return `project_semantic_search failed: ${e instanceof Error ? e.message : String(e)}`;
+  }
+}
+
+// ─── Tool: plan_exploration (9.2) ────────────────────────────────────────────
+
+function planExploration(
+  args: { task?: string; max_files?: number },
+  projectRoot: string,
+): string {
+  const task = args.task?.trim();
+  if (!task) return "plan_exploration: \"task\" argument is required";
+  const proj = resolveProjectId(projectRoot);
+  if (!proj) {
+    return "plan_exploration: no project index available — explore with file_outline/grep instead.";
+  }
+  const graph: GraphAccess = {
+    query: (kw, limit) =>
+      localDbQuery(proj.id, kw, undefined, limit).map(s => ({
+        name: s.name, kind: s.kind, file: s.file, line: s.line,
+      })),
+    callers: (name) => localDbCallers(proj.id, name, 1),
+  };
+  try {
+    const steps = buildPlan(task, graph, args.max_files);
+    return renderPlan(task, steps);
+  } catch (e) {
+    return `plan_exploration failed: ${e instanceof Error ? e.message : String(e)}`;
   }
 }
 
@@ -911,7 +942,7 @@ export async function executeTools(tc: ToolCall, projectRoot: string, client?: K
     case "grep":         return grepFiles(args as unknown as GrepArgs, projectRoot);
     case "list_dir":     return listDir(args as unknown as ListDirArgs, projectRoot);
     case "run_command":  return runCommand(args as unknown as RunCommandArgs, projectRoot);
-    case "shell_output": return readBackground(String((args as { id?: string }).id ?? ""));
+    case "shell_output": return filterCommandOutput(readBackground(String((args as { id?: string }).id ?? "")));
     case "shell_kill":   return killBackground(String((args as { id?: string }).id ?? ""));
     case "web_fetch":    return webFetch(args as unknown as WebFetchArgs);
     case "web_search":   return webSearch(args as unknown as WebSearchArgs, client);
@@ -923,6 +954,8 @@ export async function executeTools(tc: ToolCall, projectRoot: string, client?: K
       return fileOutline(args as { path: string }, projectRoot, client ?? null);
     case "impact_check":
       return impactCheck(args as { symbol: string; file?: string }, projectRoot, client ?? null);
+    case "plan_exploration":
+      return planExploration(args as { task?: string; max_files?: number }, projectRoot);
     case "project_semantic_search":
       return semanticSearch(args as { query: string; limit?: number }, projectRoot, client ?? null);
     case "browser_navigate":
@@ -1496,6 +1529,32 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           },
         },
         required: ["query"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "plan_exploration",
+      description:
+        "Plan the optimal file-read order for a task BEFORE reading anything. Returns an ordered " +
+        "list of files with a read depth for each (outline / targeted section / full read) derived " +
+        "from the code graph: files named in the task, files defining matched symbols, and their " +
+        "callers. Call this FIRST on any task touching more than one file, then follow the plan — " +
+        "it is far cheaper than reading files in discovery order.",
+      parameters: {
+        type: "object",
+        properties: {
+          task: {
+            type: "string",
+            description: "The task to plan exploration for, in full — include identifiers, file names, and error text verbatim.",
+          },
+          max_files: {
+            type: "number",
+            description: "Maximum files in the plan (default 8).",
+          },
+        },
+        required: ["task"],
       },
     },
   },

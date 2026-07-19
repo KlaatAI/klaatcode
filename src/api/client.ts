@@ -37,12 +37,22 @@ export interface ToolDefinition {
   };
 }
 
+/** Server doom-loop detection (D6) — sent on the final SSE chunk when the
+ * CURRENT response repeats the same trailing tool round yet again. */
+export interface LoopSignal {
+  kind: string;               // "tool_repetition"
+  count: number;              // consecutive identical rounds
+  tools?: string[];           // tool names involved
+  results_identical?: boolean; // true = act (abort round); false = warn only
+}
+
 export interface KlaatAIMetadata {
   tier: string;
   reason: string;
   model: string;
   provider: string;
   cascade_position: number;
+  loop_signal?: LoopSignal;
 }
 
 export interface ChatResponse {
@@ -65,6 +75,10 @@ export interface QuotaSnapshot {
   tier?: string;           // X-KlaatAI-Tier (authoritative served tier)
   /** X-KlaatAI-Stream-Mode: "live" (A2 passthrough) or "buffered" fallback. */
   streamMode?: string;
+  /** X-KlaatAI-Loop-Signal: e.g. "tool_repetition:3" — the transcript the
+   * server RECEIVED already ended in n identical tool rounds (warn-level;
+   * the actionable per-response signal arrives in metadata.loop_signal). */
+  loopSignal?: string;
 }
 
 export interface StreamChunk {
@@ -534,6 +548,22 @@ export class KlaatAIClient {
       });
     }
 
+    // Honor the server retry contract (D6): X-KlaatAI-Retry "no" = the cascade
+    // already exhausted its failovers, never client-retry; "after-<s>" = one
+    // scheduled retry. Waits over 60s (e.g. daily-quota Retry-After pointing at
+    // midnight UTC) are not slept on — surface the error instead.
+    if (!res.ok && !this._custom) {
+      const waitMs = KlaatAIClient.retryDelayMs(res.headers, res.status);
+      if (waitMs !== null && waitMs <= 60_000) {
+        await new Promise(r => setTimeout(r, waitMs));
+        res = await fetch(target.url, {
+          method: "POST",
+          headers: this.headers(reqHeaders),
+          body: JSON.stringify(body),
+        });
+      }
+    }
+
     if (!res.ok) {
       const text = await res.text().catch(() => "");
       yield { type: "error", error: sanitizeError(text, res.status) };
@@ -637,6 +667,23 @@ export class KlaatAIClient {
   }
 
   /**
+   * Server retry contract → delay in ms for ONE scheduled client retry, or
+   * null for "do not retry". `X-KlaatAI-Retry: no` always wins (cascade
+   * exhausted); `after-<s>` schedules; bare 429s fall back to `Retry-After`.
+   */
+  static retryDelayMs(h: Headers, status: number): number | null {
+    const hint = h.get("X-KlaatAI-Retry");
+    if (hint === "no") return null;
+    const m = hint?.match(/^after-(\d+(?:\.\d+)?)$/);
+    if (m) return Math.round(Number(m[1]) * 1000);
+    if (status === 429) {
+      const ra = Number(h.get("Retry-After"));
+      if (Number.isFinite(ra) && ra > 0) return Math.round(ra * 1000);
+    }
+    return null;
+  }
+
+  /**
    * Parse the E1 weighted-unit quota + tier from response headers. Returns null
    * when none are present (older server / non-subscription auth). Tolerant of a
    * missing subset — populates only the fields the server actually sent.
@@ -656,6 +703,7 @@ export class KlaatAIClient {
       plan:          h.get("X-KlaatAI-Quota-Plan") ?? h.get("X-KlaatAI-Plan") ?? undefined,
       tier:          h.get("X-KlaatAI-Tier") ?? undefined,
       streamMode:    h.get("X-KlaatAI-Stream-Mode") ?? undefined,
+      loopSignal:    h.get("X-KlaatAI-Loop-Signal") ?? undefined,
     };
     const has = Object.values(q).some(v => v !== undefined);
     return has ? q : null;

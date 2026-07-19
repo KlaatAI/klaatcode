@@ -39,7 +39,69 @@ export function charBudgetForWindow(contextWindowTokens?: number): number {
   return Math.min(MAX_SEND_CHARS, Math.round(usable * CHARS_PER_TOKEN * 0.85));
 }
 
-export function compactMessagesForApi(msgs: Message[], contextWindowTokens?: number): Message[] {
+/**
+ * Attention-ordered arrangement of the old-history zone (roadmap 9.3).
+ *
+ * LLMs attend most strongly to the start and end of the context window and
+ * weakest to the middle ("lost in the middle"). The old zone — everything
+ * between the protected system seed and the protected recent turns — sits in
+ * that weak middle by construction. Within it, we move the highest-relevance
+ * turn groups to the zone's edges and bury low-relevance exploration noise in
+ * its center.
+ *
+ * Correctness constraints:
+ *   - only whole TURN GROUPS move (a user message plus the assistant/tool
+ *     messages that follow it), so assistant tool_calls always stay adjacent
+ *     to their tool results — providers reject orphaned pairings;
+ *   - a compaction-summary stub is pinned to the front of the zone;
+ *   - zones with fewer than MIN_GROUPS_TO_REORDER groups are left in
+ *     chronological order (nothing meaningful to gain).
+ */
+const MIN_GROUPS_TO_REORDER = 6;
+
+function groupScore(group: Message[]): number {
+  let score = 0;
+  for (const m of group) {
+    const c = typeof m.content === "string" ? m.content : "";
+    if (m.role === "assistant" && c.startsWith("[Context compacted")) score += 100; // pin front
+    if (m.role === "user" && c.length > 200) score += 2;              // real instructions
+    if (m.role === "tool") {
+      if (/\bchars trimmed\b/.test(c)) score -= 1;                     // already-degraded noise
+      else if (c.length > 800) score += 2;                             // surviving full read
+      else if (/^OK[:,]|^Applied|^Edited|^Wrote/.test(c)) score += 1;  // mutation record
+    }
+  }
+  return score;
+}
+
+/** Split a message span into turn groups (each starts at a user message). */
+function splitTurnGroups(zone: Message[]): Message[][] {
+  const groups: Message[][] = [];
+  for (const m of zone) {
+    if (m.role === "user" || groups.length === 0) groups.push([m]);
+    else groups[groups.length - 1]!.push(m);
+  }
+  return groups;
+}
+
+/** Arrange ranked groups edges-first: best at the zone's start and end, worst in the middle. */
+export function orderForAttention(zone: Message[]): Message[] {
+  const groups = splitTurnGroups(zone);
+  if (groups.length < MIN_GROUPS_TO_REORDER) return zone;
+  const ranked = groups
+    .map((g, idx) => ({ g, idx, score: groupScore(g) }))
+    .sort((a, b) => b.score - a.score || a.idx - b.idx); // stable: ties stay chronological
+  const front: Message[][] = [];
+  const back: Message[][] = [];
+  ranked.forEach((r, i) => (i % 2 === 0 ? front.push(r.g) : back.unshift(r.g)));
+  return [...front, ...back].flat();
+}
+
+export function compactMessagesForApi(
+  msgs: Message[],
+  contextWindowTokens?: number,
+  opts?: { attentionOrder?: boolean },
+): Message[] {
   const maxSendChars = charBudgetForWindow(contextWindowTokens);
   // On tight budgets, trim old tool results proportionally harder too.
   const factor = Math.max(0.25, Math.min(1, maxSendChars / MAX_SEND_CHARS));
@@ -127,6 +189,33 @@ export function compactMessagesForApi(msgs: Message[], contextWindowTokens?: num
       if (end >= body.length) break;
       body = body.slice(end);
       result = [...system, ...body];
+    }
+  }
+
+  // 9.3: attention-order the old zone LAST — after the hard cap, so the
+  // drop-oldest loop above still removes chronologically-oldest turns, not
+  // the high-relevance groups this pass moves to the front.
+  if (opts?.attentionOrder !== false) {
+    let sysEnd = 0;
+    while (sysEnd < result.length && result[sysEnd].role === "system") sysEnd++;
+    // Recompute the protected-recent boundary on the post-cap array…
+    let assistants = 0;
+    let cut = result.length;
+    for (let i = result.length - 1; i >= sysEnd; i--) {
+      if (result[i].role === "assistant") {
+        assistants++;
+        if (assistants >= RECENT_TURNS_FULL) { cut = i; break; }
+      }
+    }
+    // …then pull it back to a turn-group boundary so no user message is
+    // separated from its assistant reply.
+    while (cut > sysEnd && cut < result.length && result[cut].role !== "user") cut--;
+    if (cut > sysEnd) {
+      result = [
+        ...result.slice(0, sysEnd),
+        ...orderForAttention(result.slice(sysEnd, cut)),
+        ...result.slice(cut),
+      ];
     }
   }
 

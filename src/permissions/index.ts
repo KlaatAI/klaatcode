@@ -37,6 +37,7 @@ export const SAFE_TOOLS = new Set([
   "project_graph_query",
   "project_semantic_search",
   "impact_check",
+  "plan_exploration",
   "todo_read",
   // Background-shell polling/stop — only affect processes the model itself started.
   "shell_output",

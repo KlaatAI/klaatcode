@@ -57,6 +57,9 @@ import { executeTools, TOOL_DEFINITIONS, configureSandbox } from "../tools/index
 import { dialectForTier, toolsForDialect, dialectIncludesExtras, type ToolDialect } from "../tools/dialects.js";
 import { PluginRegistry } from "../tools/plugins.js";
 import { configureDiagnostics } from "../tools/diagnostics.js";
+import { setOutputFilterEnabled } from "../tools/output-filter.js";
+import { PhaseTracker } from "../agent/phase-budget.js";
+import { collectCriticalState, checkSummaryCoverage } from "../agent/collapse-check.js";
 import { killAllBackground } from "../tools/background.js";
 import { KGIndexer, type IndexProgress } from "../tools/kg-indexer.js";
 import { initLocalDb, localDbGetStats } from "../tools/local-db.js";
@@ -290,6 +293,97 @@ export async function runREPL(
 
   let totalTokens:  { prompt: number; completion: number } = { prompt: 0, completion: 0 };
   let lastContextSize: number = 0; // actual context size from last API call (prompt_tokens)
+
+  // ─── 9.4 budget guards ─────────────────────────────────────────────────────
+  const sessionStart = Date.now();
+  /** Per-response cost events for burn-rate calculation (bounded). */
+  let costEvents: { t: number; cost: number }[] = [];
+  /** Cost attributed to the current user task (between user messages). */
+  let currentTaskCost = 0;
+  let currentTaskLabel: string | null = null;
+  const taskCostLog: { label: string; cost: number }[] = [];
+  let lastBurnWarnAt = 0;
+  /** Set when config.maxSessionCost is crossed — stops further agent rounds
+   * this turn; each new user message re-arms exactly one more round. */
+  let budgetStop = false;
+  /** Consecutive doom-loop refusal rounds (breaks the loop at 3). */
+  let loopRefusals = 0;
+
+  // ─── 9.5 per-phase token budgets (logic in agent/phase-budget.ts) ──────────
+  const phaseTracker = new PhaseTracker({ enabled: config.phaseBudgets !== "off" });
+
+  /** Attribute usage + budget check; called from the metadata handler. */
+  function checkPhaseBudget(totalTokensThisTurn: number): void {
+    const ev = phaseTracker.addUsage(totalTokensThisTurn);
+    if (!ev) return;
+    if (ev.kind === "pause") {
+      messages.push({
+        role: "system", kind: "error",
+        content:
+          `⛔ Exploration used ${formatTok(ev.used)} tokens without producing an edit ` +
+          `or answer (budget ${formatTok(ev.budget)}). Paused — the agent may be stuck. ` +
+          `Narrow the task, point it at specific files, or send "continue" to allow more exploration.`,
+      });
+    } else {
+      messages.push({
+        role: "system",
+        content:
+          `⚠ The ${ev.phase} phase passed its soft token budget ` +
+          `(${formatTok(ev.used)} / ${formatTok(ev.budget)}). See /cost for the phase breakdown.`,
+      });
+    }
+    chatLinesDirty = true;
+  }
+
+  function recordTurnCost(cost: number): void {
+    costEvents.push({ t: Date.now(), cost });
+    currentTaskCost += cost;
+    if (costEvents.length > 500) costEvents = costEvents.slice(-500);
+  }
+
+  /** $ spent in the trailing window, normalized to per-minute. */
+  function burnRatePerMin(windowMs = 60_000): number {
+    const cutoff = Date.now() - windowMs;
+    return costEvents.filter(e => e.t >= cutoff).reduce((s, e) => s + e.cost, 0) * (60_000 / windowMs);
+  }
+
+  function sessionAvgPerMin(): number {
+    return sessionCost / Math.max(1, (Date.now() - sessionStart) / 60_000);
+  }
+
+  /** Burn-rate + hard-cap checks; called after every usage report. */
+  function checkBudgetGuards(): void {
+    const cap = config.maxSessionCost;
+    if (cap && cap > 0 && sessionCost >= cap && !budgetStop) {
+      budgetStop = true;
+      messages.push({
+        role: "system", kind: "error",
+        content:
+          `⛔ Session cost $${sessionCost.toFixed(4)} reached the maxSessionCost cap ($${cap.toFixed(2)}). ` +
+          `Agent rounds paused — send a message to continue one round at a time, or raise/remove ` +
+          `maxSessionCost in ~/.klaatai/config.json.`,
+      });
+      chatLinesDirty = true;
+      return;
+    }
+    // Spend-rate anomaly: current burn > 3× session average. Only meaningful
+    // once the session has history and real spend.
+    const now = Date.now();
+    if (now - sessionStart > 3 * 60_000 && sessionCost > 0.02 && now - lastBurnWarnAt > 5 * 60_000) {
+      const burn = burnRatePerMin();
+      const avg = sessionAvgPerMin();
+      if (avg > 0 && burn > 3 * avg) {
+        lastBurnWarnAt = now;
+        messages.push({
+          role: "system",
+          content:
+            `⚠ Burn rate $${burn.toFixed(4)}/min is ${(burn / avg).toFixed(1)}× the session average ` +
+            `($${avg.toFixed(4)}/min). Check /cost — a loop or an oversized context may be burning budget.`,
+        });
+        chatLinesDirty = true;
+      }
+    }
+  }
   let forceTier:    string | null      = null;
   // Active third-party model name (null = Klaatu). See /model; config.customModels.
   let activeCustomModel: string | null = null;
@@ -584,6 +678,7 @@ export async function runREPL(
     { cmd: "/commit",     desc: "AI commit message + commit" },
     { cmd: "/compact",    desc: "Summarize context to free token window" },
     { cmd: "/cost",       desc: "Session cost + quota + context usage" },
+    { cmd: "/context",    desc: "What's in the context window vs compacted away" },
     { cmd: "/diff",       desc: "Git diff (optionally one file)" },
     { cmd: "/doctor",     desc: "Diagnostics: auth, API, MCP, tools, config" },
     { cmd: "/exit",       desc: "Quit KLAAT CODE" },
@@ -796,6 +891,13 @@ export async function runREPL(
     enabled: config.diagnostics !== "off",
     commands: config.diagnosticsCommands,
   });
+
+  // 9.1: tool-output noise filter (progress bars, passing-test spam, dupes).
+  setOutputFilterEnabled(config.outputFilter !== "off");
+
+  // 9.3: attention-ordered old-context arrangement, config-gated.
+  const compactOpts = (): { attentionOrder: boolean } =>
+    ({ attentionOrder: config.attentionOrder !== "off" });
 
   const modifiedFiles: FileChange[] = [];
 
@@ -1514,7 +1616,7 @@ export async function runREPL(
       let subText = "";
 
       const stream = client.chatStream(
-        compactMessagesForApi(subApiMsgs, TIER_CONTEXT_WINDOW[args.tier ?? persona.tier]), {
+        compactMessagesForApi(subApiMsgs, TIER_CONTEXT_WINDOW[args.tier ?? persona.tier], compactOpts()), {
         tools: subTools,
         tier:  args.tier ?? persona.tier,
       });
@@ -1732,6 +1834,36 @@ export async function runREPL(
           if (q.plan) parts.push(`  Plan:       ${q.plan}`);
           if (parts.length) quotaBlock = `\n\n**Daily quota:**\n${parts.join("\n")}`;
         }
+        // 9.4: burn rate + per-task attribution + budget cap status.
+        const burn = burnRatePerMin();
+        const avg  = sessionAvgPerMin();
+        let burnBlock =
+          `\n\n**Burn rate:**\n` +
+          `  Last minute:  $${burn.toFixed(4)}/min\n` +
+          `  Session avg:  $${avg.toFixed(4)}/min` +
+          (avg > 0 && burn > 3 * avg ? `  ⚠ ${(burn / avg).toFixed(1)}× average` : "");
+        if (config.maxSessionCost && config.maxSessionCost > 0) {
+          const pct = Math.min(999, Math.round((sessionCost / config.maxSessionCost) * 100));
+          burnBlock += `\n  Budget cap:   $${config.maxSessionCost.toFixed(2)} (${pct}% used)`;
+        }
+        const recentTasks = [
+          ...taskCostLog.slice(-4),
+          ...(currentTaskLabel !== null ? [{ label: `${currentTaskLabel} (current)`, cost: currentTaskCost }] : []),
+        ];
+        const taskBlock = recentTasks.length
+          ? `\n\n**Per-task cost:**\n` +
+            recentTasks.map(t => `  $${t.cost.toFixed(4)}  ${t.label}`).join("\n")
+          : "";
+        // 9.5: phase breakdown for the current task.
+        const pt = phaseTracker.tokens;
+        const phaseTotal = pt.explore + pt.implement + pt.verify;
+        const phaseBlock = phaseTotal > 0
+          ? `\n\n**Current task by phase:**\n` +
+            (["explore", "implement", "verify"] as const)
+              .filter(p => pt[p] > 0)
+              .map(p => `  ${p.padEnd(9)} ${formatTok(pt[p])} / ${formatTok(phaseTracker.budgets[p])} toks${p === phaseTracker.phase ? "  ← now" : ""}`)
+              .join("\n")
+          : "";
         pushSystemMsg(
           `**Session:**\n` +
           `  Requests: ${totalRequests}\n` +
@@ -1740,7 +1872,41 @@ export async function runREPL(
           `  Cost: $${sessionCost.toFixed(4)}\n\n` +
           `**Context (current):**\n` +
           `  Used: ${formatTok(lastContextSize)} / ${formatTok(getContextWindow())} toks` +
+          burnBlock +
+          phaseBlock +
+          taskBlock +
           quotaBlock
+        );
+        return true;
+      }
+
+      case "/context": {
+        // 9.6: visibility into what the model can still see vs what only
+        // survives in the ledger.
+        let sysN = 0, userN = 0, asstN = 0, toolN = 0, trimmedN = 0, chars = 0;
+        for (const m of apiMessages) {
+          if (m.role === "system") sysN++;
+          else if (m.role === "user") userN++;
+          else if (m.role === "assistant") asstN++;
+          else if (m.role === "tool") toolN++;
+          if (typeof m.content === "string") {
+            chars += m.content.length;
+            if (m.content.includes("chars trimmed")) trimmedN++;
+          }
+        }
+        const window = getContextWindow();
+        const pct = window > 0 ? Math.round((lastContextSize / window) * 100) : 0;
+        const compactedStub = apiMessages.some(m =>
+          typeof m.content === "string" && m.content.startsWith("[Context compacted"));
+        pushSystemMsg(
+          `**Context window:**\n` +
+          `  Last request: ${formatTok(lastContextSize)} / ${formatTok(window)} toks (${pct}%)\n` +
+          `  In memory: ${apiMessages.length} messages (${sysN} system, ${userN} user, ${asstN} assistant, ${toolN} tool) ≈ ${formatTok(Math.round(chars / 4))} toks\n` +
+          `  Degraded in place: ${trimmedN} trimmed tool result${trimmedN === 1 ? "" : "s"}\n\n` +
+          `**Compacted away:**\n` +
+          `  Compactions this session: ${compactionCount}${compactedStub ? " (summary stub in context)" : ""}\n` +
+          `  Recoverable details: ${ledger.path}\n` +
+          `  (the model re-reads that file when it needs pre-compaction specifics)`
         );
         return true;
       }
@@ -2971,6 +3137,19 @@ export async function runREPL(
     chatLinesDirty = true;
     chatAutoScroll = true;
 
+    // 9.4: per-task cost attribution — close the previous task's tally and
+    // start a new one; a new user message also re-arms one round past a hit
+    // budget cap (the user consciously chose to continue).
+    if (currentTaskLabel !== null) {
+      taskCostLog.push({ label: currentTaskLabel, cost: currentTaskCost });
+      if (taskCostLog.length > 20) taskCostLog.shift();
+    }
+    currentTaskLabel = text.replace(/\s+/g, " ").trim().slice(0, 60);
+    currentTaskCost = 0;
+    budgetStop = false;
+    // 9.5: fresh phase tracking per task; a new message clears a phase pause.
+    phaseTracker.reset();
+
     // ── Tab mode system prompt (Build vs Plan) ────────────────────────────
     const tabPrompt = TAB_SYSTEM_PROMPTS[tabs.activeTab.label];
     const tabSystemMsg: Message | null = tabPrompt
@@ -3020,6 +3199,8 @@ export async function runREPL(
           ];
       let fullText = "";
       let currentApiMessages = [...newApiMessages];
+      // 9.4: per-response doom-loop signal (reset each round).
+      let turnLoopSignal: import("../api/client.js").LoopSignal | null = null;
 
       interrupted = false;
 
@@ -3028,17 +3209,18 @@ export async function runREPL(
         replState    = "thinking";
         streamBuffer = "";
         fullText     = "";
+        turnLoopSignal = null;
         chatLinesDirty = true;
         app.requestRender();
 
         // Pre-send check: if real token count from last call exceeded budget,
         // compact the stored messages BEFORE building the send array.
         if (lastContextSize > SAFE_CONTEXT_BUDGET && currentApiMessages.length > 8) {
-          currentApiMessages = compactMessagesForApi(currentApiMessages, getContextWindow());
+          currentApiMessages = compactMessagesForApi(currentApiMessages, getContextWindow(), compactOpts());
         }
 
         const stream = client.chatStream(
-          compactMessagesForApi(currentApiMessages, getContextWindow()),
+          compactMessagesForApi(currentApiMessages, getContextWindow(), compactOpts()),
           {
             tools: tools.length > 0 ? tools : undefined,
             tier: forceTier ?? undefined,
@@ -3087,7 +3269,9 @@ export async function runREPL(
                 lastTier  = chunk.metadata.tier ?? "smart";
                 lastClamp = parseClamp(chunk.metadata.reason);
                 const [inp, out] = TIER_COSTS[chunk.metadata.tier] ?? [0.5, 1.5];
-                sessionCost += (chunk.usage.prompt_tokens * inp + chunk.usage.completion_tokens * out) / 1_000_000;
+                const turnCost = (chunk.usage.prompt_tokens * inp + chunk.usage.completion_tokens * out) / 1_000_000;
+                sessionCost += turnCost;
+                recordTurnCost(turnCost);
                 totalTokens = {
                   prompt:     totalTokens.prompt     + chunk.usage.prompt_tokens,
                   completion: totalTokens.completion + chunk.usage.completion_tokens,
@@ -3096,6 +3280,12 @@ export async function runREPL(
                 totalRequests++;
                 const recordedTier = forceTier ?? lastTier;
                 tierCounts.set(recordedTier, (tierCounts.get(recordedTier) ?? 0) + 1);
+                // 9.4: doom-loop signal for THIS response (D6 wire contract).
+                turnLoopSignal = chunk.metadata.loop_signal ?? null;
+                checkBudgetGuards();
+                // 9.5: attribute this response to the current phase.
+                checkPhaseBudget(chunk.usage.total_tokens
+                  ?? chunk.usage.prompt_tokens + chunk.usage.completion_tokens);
               }
               break;
             case "done":
@@ -3114,6 +3304,19 @@ export async function runREPL(
           }
         } // end for-await
 
+        // 9.4/9.5: budget hard-cap or phase pause — finish rendering this
+        // response but run no further agent rounds this turn.
+        if ((budgetStop || phaseTracker.paused) && pendingToolCalls && pendingToolCalls.length > 0) {
+          messages.push({
+            role: "system", kind: "error",
+            content: budgetStop
+              ? "⛔ Pending tool calls skipped — session cost cap reached (see message above)."
+              : "⛔ Pending tool calls skipped — exploration budget exhausted with no artifact (see message above).",
+          });
+          chatLinesDirty = true;
+          break;
+        }
+
         if (pendingToolCalls && pendingToolCalls.length > 0) {
           replState = "tool";
           const cleanedToolText = stripStrayTextToolCallArtifacts(
@@ -3123,6 +3326,53 @@ export async function runREPL(
             ...currentApiMessages,
             { role: "assistant", content: cleanedToolText, tool_calls: pendingToolCalls },
           ];
+
+          // 9.4: server doom-loop reaction (D6). results_identical means the
+          // model just repeated the same tool round with identical args AND
+          // got identical results before — executing it again is pure waste.
+          // Refuse the round, hand back recovery guidance as the tool result
+          // (role "tool" continuations are quota-free), and let it rethink.
+          if (turnLoopSignal?.results_identical) {
+            loopRefusals++;
+            const names = [...new Set(pendingToolCalls.map(t => t.function.name))].join(", ");
+            if (loopRefusals >= 3) {
+              messages.push({
+                role: "system", kind: "error",
+                content:
+                  `⛔ Stopped: the model repeated the same tool round (${names}) even after ` +
+                  `${loopRefusals - 1} recovery prompts. Rephrase the request or give it a hint about what to try instead.`,
+              });
+              chatLinesDirty = true;
+              break;
+            }
+            const guidance =
+              `Refused: doom-loop detected (server signal). You have called ${names} with identical ` +
+              `arguments ${turnLoopSignal.count}+ times and received identical results each time. ` +
+              `Do NOT repeat this call. Change approach: re-read the last error carefully, question your ` +
+              `assumption about the file/command state, try a different tool, or ask the user with ask_user.`;
+            for (const tc of pendingToolCalls) {
+              currentApiMessages = [
+                ...currentApiMessages,
+                { role: "tool", content: guidance, tool_call_id: tc.id },
+              ];
+            }
+            messages.push({
+              role: "system",
+              content: `↻ Doom loop detected (${names} × ${turnLoopSignal.count}) — round refused, recovery guidance injected.`,
+            });
+            chatLinesDirty = true;
+            app.requestRender();
+            continue;
+          }
+          if (turnLoopSignal && !turnLoopSignal.results_identical) {
+            // Weak signal (same calls, differing results) — warn only.
+            messages.push({
+              role: "system",
+              content: `⚠ Repetitive tool pattern noticed by the server (${turnLoopSignal.count}× similar rounds) — watching for a loop.`,
+            });
+            chatLinesDirty = true;
+          }
+          loopRefusals = 0;
 
           // Partition consecutive read-only tools into concurrent batches
           // (order preserved). Mutating/prompting tools always run alone, so
@@ -3258,6 +3508,8 @@ export async function runREPL(
           }
           }
           if (interrupted) break outerLoop;
+          // 9.5: reclassify the agent phase from this round's tools.
+          phaseTracker.noteTools(pendingToolCalls.map(t => t.function.name));
           continue;
         }
         break;
@@ -3344,6 +3596,7 @@ export async function runREPL(
   // ─── Context compaction ───────────────────────────────────────────────────
 
   let consecutiveCompactFailures = 0;
+  let compactionCount = 0; // 9.6: shown in /context
 
   async function compactContext(): Promise<void> {
     if (apiMessages.length < 6) return;
@@ -3376,6 +3629,11 @@ export async function runREPL(
       ...flattened,
       { role: "user", content: COMPACTION_PROMPT },
     ];
+    // 9.6: externalize critical state BEFORE the lossy step — this is what
+    // the post-compaction self-check verifies against, and what a later model
+    // reads from the ledger if the check reports loss.
+    const criticalState = collectCriticalState(toSummarise, modifiedFiles.map(f => f.path));
+    ledger.sessionState(criticalState);
     try {
       replState    = "thinking";
       streamBuffer = "";
@@ -3403,7 +3661,9 @@ export async function runREPL(
             completion: totalTokens.completion + chunk.usage.completion_tokens,
           };
           const [inp, out] = TIER_COSTS["code"] ?? [0.5, 1.5];
-          sessionCost += (chunk.usage.prompt_tokens * inp + chunk.usage.completion_tokens * out) / 1_000_000;
+          const compactCost = (chunk.usage.prompt_tokens * inp + chunk.usage.completion_tokens * out) / 1_000_000;
+          sessionCost += compactCost;
+          recordTurnCost(compactCost);
         }
       }
 
@@ -3416,6 +3676,16 @@ export async function runREPL(
       // and the in-context stub points any future (possibly different) model at it.
       ledger.compacted(summary);
 
+      // 9.6: post-compaction self-check — did the summary drop the task
+      // intent or the files being worked on? If so, say so IN CONTEXT so the
+      // model knows what it forgot and where to recover it.
+      const missing = checkSummaryCoverage(summary, criticalState);
+      const recoveryNote = missing.length
+        ? `\n[Compaction check: the summary above may have LOST ${missing.join("; ")}. ` +
+          `Before continuing, read_file ${ledger.path} (section "Session state") to recover it.]`
+        : "";
+      compactionCount++;
+
       // Replace apiMessages: [system seed, summary stub, last 4]
       const last4  = apiMessages.slice(-4);
       apiMessages  = [
@@ -3425,7 +3695,8 @@ export async function runREPL(
           content:
             `[Context compacted — structured summary of earlier conversation below. ` +
             `Resume the task without acknowledging this summary.]\n${summary}\n` +
-            `(Earlier details recoverable: read_file ${ledger.path})`,
+            `(Earlier details recoverable: read_file ${ledger.path})` +
+            recoveryNote,
         },
         ...last4,
       ];
@@ -3435,6 +3706,12 @@ export async function runREPL(
         content: `**Context compacted.** Earlier conversation summarised:\n\n${summary}`,
       };
       messages.push(noticeMsg);
+      if (missing.length) {
+        messages.push({
+          role: "system",
+          content: `⚠ Compaction self-check: possible context loss — ${missing.join("; ")}. Recovery note injected (details in the session ledger).`,
+        });
+      }
       chatLinesDirty = true;
       chatAutoScroll = true;
     } catch (err) {
