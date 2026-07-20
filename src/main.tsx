@@ -1112,6 +1112,16 @@ program
     await runWeb({ port: parseInt(opts.port, 10) || 4200, apiKey: opts.apiKey, baseUrl: opts.baseUrl, noBrowser: opts.noBrowser });
   });
 
+// ── klaatai completions ───────────────────────────────────────────────────────
+
+program
+  .command("completions <shell>")
+  .description("Print shell completion script (bash | zsh | fish)")
+  .action(async (shell: string) => {
+    const { runCompletions } = await import("./commands/completions.js");
+    runCompletions(shell);
+  });
+
 // ─── Parse ───────────────────────────────────────────────────────────────────
 
 program.parseAsync(process.argv).catch((err: unknown) => {

@@ -117,6 +117,20 @@ brew install KlaatAI/klaatcode/klaatcode
 
 All methods install both `klaatcode` and `klaatai` — identical commands, use whichever you like.
 
+**Shell completions (bash / zsh / fish)**
+```bash
+# bash
+klaatai completions bash >> ~/.bashrc
+
+# zsh
+mkdir -p ~/.zfunc
+klaatai completions zsh > ~/.zfunc/_klaatai
+# ensure fpath includes ~/.zfunc, then: autoload -Uz compinit && compinit
+
+# fish
+klaatai completions fish > ~/.config/fish/completions/klaatai.fish
+```
+
 ## Quick Start
 
 ```bash
