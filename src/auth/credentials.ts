@@ -28,7 +28,7 @@ export interface Credentials {
 export interface Config {
   baseUrl: string;             // KlaatAI API base URL
   routingDisplay: "minimal" | "full" | "off";
-  theme: string;               // Theme name: dark | light | dracula | nord | ayu | catppuccin | gruvbox
+  theme: string;               // Theme name from THEME_NAMES (for example dark, light, tokyo-night)
   vimMode: boolean;            // Vim-style key bindings in the input field
   /**
    * Disable TLS certificate verification (corporate MITM proxies whose root
