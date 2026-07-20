@@ -3,6 +3,7 @@ import {
   renderSessionMarkdown,
   defaultExportPath,
   resolveExportPath,
+  fenceFor,
   type ExportMessage,
 } from "./export-session";
 
@@ -19,6 +20,21 @@ describe("defaultExportPath / resolveExportPath", () => {
   test("resolveExportPath honors an explicit path", () => {
     expect(resolveExportPath("s1", "./out.md", "/work")).toBe("./out.md");
     expect(resolveExportPath("s1", "/tmp/session.md", "/work")).toBe("/tmp/session.md");
+  });
+});
+
+describe("fenceFor", () => {
+  test("uses at least triple backticks", () => {
+    expect(fenceFor("hello")).toEqual({ open: "```", close: "```" });
+  });
+
+  test("lengthens fence past nested backticks in the body", () => {
+    expect(fenceFor("code with ``` inside")).toEqual({ open: "````", close: "````" });
+    expect(fenceFor("even ```` four")).toEqual({ open: "`````", close: "`````" });
+  });
+
+  test("keeps info string on the opening fence", () => {
+    expect(fenceFor("-a\n+b", "diff")).toEqual({ open: "```diff", close: "```" });
   });
 });
 
@@ -69,6 +85,28 @@ describe("renderSessionMarkdown", () => {
     expect(md).toContain("### Tool: $ ls");
     expect(md).not.toContain("<details>");
     expect(md).toContain("```\nok\n```");
+  });
+
+  test("tool output containing markdown fences uses a longer outer fence", () => {
+    const nested = [
+      "example:",
+      "```ts",
+      "const x = 1;",
+      "```",
+      "done",
+      "more",
+      "lines",
+      "here",
+    ].join("\n");
+    const messages: ExportMessage[] = [
+      { role: "tool", toolName: "read_file", toolSummary: "read demo.md", content: nested },
+    ];
+    const md = renderSessionMarkdown({ ...base, messages });
+    expect(md).toContain("````\n");
+    expect(md).toContain("```ts");
+    expect(md).toContain("const x = 1;");
+    // Outer close is four ticks — nested triple fence must not terminate early.
+    expect(md).toMatch(/````\n[\s\S]*```ts[\s\S]*```\n[\s\S]*````/);
   });
 
   test("tool diffs render as fenced diff blocks", () => {

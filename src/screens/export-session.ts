@@ -47,6 +47,18 @@ function diffStat(diff: ExportDiffLine[]): { add: number; del: number } {
   return { add, del };
 }
 
+/** Fence long enough that nested backticks in `body` cannot close the block early. */
+export function fenceFor(body: string, info = ""): { open: string; close: string } {
+  let longest = 2; // at least ```
+  const re = /`+/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(body)) !== null) {
+    if (m[0].length > longest) longest = m[0].length;
+  }
+  const ticks = "`".repeat(longest + 1);
+  return { open: info ? `${ticks}${info}` : ticks, close: ticks };
+}
+
 function renderDiffBlock(msg: ExportMessage): string {
   const lines: string[] = [];
   const pathNote = msg.diffPath ? ` ${msg.diffPath}` : "";
@@ -58,11 +70,11 @@ function renderDiffBlock(msg: ExportMessage): string {
   lines.push(`### Tool: ${summarizeTool(msg)}${pathNote}${stats}`);
   lines.push("");
   if (msg.diff && msg.diff.length > 0) {
-    lines.push("```diff");
-    for (const d of msg.diff) {
-      lines.push(`${d.sign}${d.text}`);
-    }
-    lines.push("```");
+    const body = msg.diff.map(d => `${d.sign}${d.text}`).join("\n");
+    const { open, close } = fenceFor(body, "diff");
+    lines.push(open);
+    lines.push(body);
+    lines.push(close);
     lines.push("");
   }
   return lines.join("\n");
@@ -90,20 +102,22 @@ function renderToolBlock(msg: ExportMessage): string {
   }
 
   if (oneLine) {
-    lines.push("```");
+    const { open, close } = fenceFor(oneLine);
+    lines.push(open);
     lines.push(oneLine);
-    lines.push("```");
+    lines.push(close);
     lines.push("");
     return lines.join("\n");
   }
 
   // Collapsed details for longer tool output — readable without dumping JSON.
+  const { open, close } = fenceFor(body);
   lines.push(`<details>`);
   lines.push(`<summary>${label} · ${lineCount} lines</summary>`);
   lines.push("");
-  lines.push("```");
+  lines.push(open);
   lines.push(body);
-  lines.push("```");
+  lines.push(close);
   lines.push("");
   lines.push("</details>");
   lines.push("");
