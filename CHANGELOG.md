@@ -3,9 +3,14 @@
 All notable changes to Klaat Code are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [2.2.4] — 2026-07-20
 
-Six features no other CLI coding agent ships built-in — token efficiency and runaway-protection, all on by default, all with an `off` switch.
+Six features no other CLI coding agent ships built-in — token efficiency and runaway-protection, all on by default, all with an `off` switch. Plus the first two community contributions.
+
+### Community
+
+- **Tokyo Night theme** (`/theme tokyo-night`) — deep navy with cool blue & green accents. Thanks [@floze-the-genius](https://github.com/floze-the-genius)! ([#40](https://github.com/KlaatAI/klaatcode/pull/40))
+- **Ruby diagnostics** — post-edit feedback loop now runs `rubocop` on `.rb` files when it's on PATH. Thanks [@siddhanttiwari19](https://github.com/siddhanttiwari19)! ([#41](https://github.com/KlaatAI/klaatcode/pull/41))
 
 ### Added
 
@@ -20,6 +25,10 @@ Six features no other CLI coding agent ships built-in — token efficiency and r
 - **Server retry contract honored.** `X-KlaatAI-Retry: no` (the server's failover cascade already exhausted every fallback) is never blindly retried; `after-<s>` schedules exactly one retry; waits over 60 s surface as errors instead of hanging your terminal.
 
 - **Benchmark refresh — 33-task suite, model-variant lanes** (2026-07-20). Suite grown to 33 tasks (5 long-context). New adapters: Claude Code on Sonnet 5, opencode on Nemotron 3 Ultra (promo-free tokens priced at published paid rates), and Cursor via both Composer 2.5 variants (`cursor-agent`, plus a `cursor-ide-bench.ts` IDE-chat lane with an objective check-script referee for when the headless CLI is unusable). Results: Klaat Code 33/33 at $0.027/solve and 23s median/task — 5.4× cheaper than Claude Code, 1.7× cheaper than the nearest rival, and no rival is both cheap and fast (Composer 2.5 standard: within 1.7× on cost but ~113s/task). Interactive cost curves + per-task comparison: [klaatai.com/benchmarks](https://klaatai.com/benchmarks).
+
+### Fixed
+
+- **Installer channels served the retired 1.x line.** `klaatai.com/api/latest` and the curl installer's npm fallback pointed at the old `klaatcode-ai` package — when the GitHub API was unreachable they reported/installed `1.15.x` instead of the current CLI. Both now resolve the `klaatcode` package. The Windows installer also stopped requesting the discontinued `windows-arm64` asset (Windows-on-ARM uses the x64 binary via built-in emulation).
 
 ### Notes
 
