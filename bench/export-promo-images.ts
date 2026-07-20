@@ -21,7 +21,7 @@ const DATA = JSON.parse(readFileSync(
   taskCount: number;
   agents: {
     id: string; label: string; model: string; highlight: boolean; solved: number; total: number;
-    costEstimated: boolean; costPerSolve: number | null;
+    costEstimated: boolean; costPerSolve: number | null; medianTaskSeconds: number;
     tasks: { id: string; costUsd: number }[];
   }[];
   taskIndex: { id: string }[];
@@ -36,8 +36,17 @@ const CHROME = [
 if (!CHROME) { console.error("No Chromium-based browser found for headless rendering."); process.exit(1); }
 
 const AGENT_COLOR: Record<string, string> = {
-  klaatcode: "#8b5cf6", opencode: "#199e70", claude: "#3987e5",
-  grok: "#d95926", cursor: "#d55181",
+  klaatcode: "#8b5cf6", opencode: "#199e70",
+  claude: "#3987e5", "claude-sonnet": "#3987e5", "claude-opus": "#7fb4f0",
+  grok: "#d95926",
+  cursor: "#d55181", "cursor-fast": "#d55181", "cursor-std": "#eb9dbd",
+};
+
+const SHORT_LABEL: Record<string, string> = {
+  klaatcode: "Klaat Code (Klaatu)",
+  "claude-sonnet": "Claude Code (Sonnet 5)", "claude-opus": "Claude Code (Opus 4.6)",
+  opencode: "OpenCode (Nemotron 3 Ultra)", grok: "Grok Build (Grok 4.5)",
+  "cursor-fast": "Cursor (Composer 2.5 Fast)", "cursor-std": "Cursor (Composer 2.5)",
 };
 
 const SIZES = [
@@ -68,7 +77,7 @@ const dearest = rivals.reduce((m, x) => (x.costPerSolve! > m.costPerSolve! ? x :
 const bigMultiple = (dearest.costPerSolve! / klaat!.costPerSolve!).toFixed(1);
 
 function chartSvg(w: number, h: number): string {
-  const top = 14, right = 170, bottom = 34, left = 56;
+  const top = 14, right = 275, bottom = 34, left = 56;
   const plotW = w - left - right, plotH = h - top - bottom;
   const maxY = Math.max(1, ...series.map(s => s.cum[n - 1] ?? 0)) * 1.04;
   const x = (i: number) => left + (i / (n - 1)) * plotW;
@@ -91,8 +100,8 @@ function chartSvg(w: number, h: number): string {
   const over = (ls[ls.length - 1]?.ly ?? 0) - (h - 40);
   if (over > 0) for (const l of ls) l.ly -= over;
   const labels = ls.map(({ s, ly }) => `
-    <text x="${w - right + 14}" y="${ly + 5}" font-size="17" font-weight="${s.a.highlight ? 800 : 600}" fill="${AGENT_COLOR[s.a.id]}" font-family="-apple-system,system-ui,sans-serif">${s.a.label}</text>
-    <text x="${w - right + 14}" y="${ly + 24}" font-size="15" fill="#a1a1aa" font-family="ui-monospace,monospace">${s.a.costEstimated ? "~" : ""}$${(s.cum[n - 1] ?? 0).toFixed(2)}</text>`).join("\n");
+    <text x="${w - right + 14}" y="${ly + 5}" font-size="17" font-weight="${s.a.highlight ? 800 : 600}" fill="${AGENT_COLOR[s.a.id]}" font-family="-apple-system,system-ui,sans-serif">${SHORT_LABEL[s.a.id] ?? s.a.label}</text>
+    <text x="${w - right + 14}" y="${ly + 24}" font-size="15" fill="#a1a1aa" font-family="ui-monospace,monospace">${s.a.costEstimated ? "~" : ""}$${(s.cum[n - 1] ?? 0).toFixed(2)} · ${Math.round(s.a.medianTaskSeconds)}s/task</text>`).join("\n");
 
   const xticks = [1, 11, 22, n].map(t =>
     `<text x="${x(t - 1)}" y="${h - 10}" text-anchor="middle" font-size="13" fill="#52525b" font-family="ui-monospace,monospace">${t}</text>`).join("");
@@ -112,7 +121,7 @@ function pageHtml(w: number, h: number): string {
   const headFs = Math.round(h * 0.062);
   const subFs = Math.round(h * 0.028);
   const chartH = Math.round(h * 0.56);
-  const solvedNote = `${klaat!.solved}/${klaat!.total} solved · ${DATA.taskCount} real coding tasks · one harness, identical prompts`;
+  const solvedNote = `${klaat!.solved}/${klaat!.total} solved · ${Math.round(klaat!.medianTaskSeconds)}s median per task (cheapest rival: ~${Math.round(cheapestRival.medianTaskSeconds)}s) · one harness, identical prompts`;
   return `<!doctype html><html><head><meta charset="utf-8"><style>
     * { margin:0; box-sizing:border-box; }
     body { width:${w}px; height:${h}px; background:#09090b; color:#fff; overflow:hidden;

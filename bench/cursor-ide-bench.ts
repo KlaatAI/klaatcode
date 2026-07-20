@@ -108,6 +108,8 @@ Rules: do not edit \`run-check.sh\`, \`manifest.json\`, \`results.json\`, or any
   // Optional: total tokens for the run, from the dashboard usage table
   // (Export CSV → sum the composer-2.5 rows in the run window).
   const tokens = Number(arg("tokens", "0"));
+  // Which Composer variant actually served (check the dashboard Model column).
+  const modelName = `${arg("model", "composer-2.5-fast")} (IDE chat)`;
   const results = JSON.parse(readFileSync(join(OUT, "results.json"), "utf-8")) as { id: string; passed: boolean; at: string }[];
   const manifest = JSON.parse(readFileSync(join(OUT, "manifest.json"), "utf-8")) as { startedAt: string; tasks: { id: string; category?: string; difficulty?: string }[] };
   const byId = new Map(results.map(r => [r.id, r]));
@@ -124,7 +126,7 @@ Rules: do not edit \`run-check.sh\`, \`manifest.json\`, \`results.json\`, or any
       promptTokens: 0, completionTokens: 0, cacheReadTokens: 0, cacheCreateTokens: 0,
       totalTokens: Math.round(tokens / manifest.tasks.length),
       turns: 0, costUsd: cost / manifest.tasks.length, costEstimated: true,
-      model: "composer-2.5-fast (IDE chat)", elapsedMs,
+      model: modelName, elapsedMs,
       runs: 1, passes: r?.passed ? 1 : 0,
       error: r ? undefined : "no check recorded",
     };
@@ -134,7 +136,7 @@ Rules: do not edit \`run-check.sh\`, \`manifest.json\`, \`results.json\`, or any
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const outPath = join(HERE, "reports", `cursor-${stamp}.json`);
   writeFileSync(outPath, JSON.stringify({
-    suite: suite.name, agent: "cursor", model: "composer-2.5-fast (IDE chat)",
+    suite: suite.name, agent: "cursor", model: modelName,
     methodology: "ide-chat single-session; cost from dashboard delta; no token counts",
     when: stamp, complete: true, runs: 1, costEstimated: true,
     solved, total: tasks.length, planned: tasks.length,

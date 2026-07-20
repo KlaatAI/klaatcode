@@ -64,15 +64,16 @@ Same 33 fixtures, same prompts, same verify command, run against KlaatCode, Clau
 
 [![Cumulative benchmark cost — Klaat Code vs Claude Code, Cursor, and opencode](bench/promo/bench-curve-github.png)](https://klaatai.com/benchmarks)
 
-Latest run — 2026-07-19, 33 tasks:
+Latest run — 2026-07-20, 33 tasks:
 
-| Metric | Klaat Code | Claude Code (Sonnet 5) | opencode (Nemotron 3 Ultra) | Cursor (Composer 2.5 Fast) |
-|---|---|---|---|---|
-| Solved | **33/33** | 33/33 | 31/33 | 33/33 |
-| Cost per solved task | **$0.027** | $0.146 | ~$0.048 est | ~$0.094 est |
-| Tokens per solved task | **51.7K** | 171.5K | 89.1K | ~28.9K |
+| Metric | Klaat Code (Klaatu-o1) | Claude (Sonnet 5) | Cursor (Composer 2.5) | Cursor (Composer 2.5 Fast) | opencode (Nemotron 3 Ultra) |
+|---|---|---|---|---|---|
+| Solved | **33/33** | 33/33 | 33/33 | 33/33 | 31/33 |
+| Cost per solved task | **$0.027** | $0.146 | ~$0.047 est | ~$0.094 est | ~$0.048 est |
+| Tokens per solved task | **51.7K** | 171.5K | ~86K | ~28.9K | 89.1K |
+| Median time per task | **23s** | 16s | ~113s | ~12s | 26s |
 
-**5.4× cheaper than Claude Code, 1.8× cheaper than the nearest competitor, at a perfect solve rate.** Promo-free and subsidized lanes are normalized to published per-token rates so the comparison reflects real token cost (details in the honesty notes). Grok Build's refresh on this suite is pending an API rate-limit window; on the previous 30-task suite it solved 30/30 at ~$0.058 est.
+**5.4× cheaper than Claude Code, 1.7× cheaper than the nearest rival, at a perfect solve rate — and no rival is both cheap and fast.** Agents near our cost are ~5× slower (Composer 2.5 standard: ~113s/task vs our 23s) or drop tasks; agents near our speed cost 3.5–5.4× more. Promo-free and subsidized lanes are normalized to published per-token rates so the comparison reflects real token cost (details in the honesty notes). Grok Build's refresh on this suite is pending an API rate-limit window; on the previous 30-task suite it solved 30/30 at ~$0.058 est.
 
 Reproduce it:
 
