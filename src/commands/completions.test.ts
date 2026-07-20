@@ -3,6 +3,7 @@ import {
   getCompletionScript,
   isCompletionShell,
   COMPLETION_SHELLS,
+  resolveCompletions,
 } from "./completions";
 
 describe("completions", () => {
@@ -46,9 +47,30 @@ describe("completions", () => {
     expect(script).toContain("compdef _klaatai klaatai klaatcode");
   });
 
+  test("zsh chat completes a project directory (matches CLI [dir] arg)", () => {
+    // Bot suggested '1:prompt:' — incorrect: `chat [dir]` opens a project directory.
+    const script = getCompletionScript("zsh");
+    expect(script).toContain("_files -/");
+  });
+
   test("fish completes both binaries", () => {
     const script = getCompletionScript("fish");
     expect(script).toContain("complete -c klaatai");
     expect(script).toContain("complete -c klaatcode");
+  });
+
+  test("resolveCompletions rejects unknown shells with a usage error", () => {
+    const bad = resolveCompletions("bogus");
+    expect(bad.ok).toBe(false);
+    if (!bad.ok) {
+      expect(bad.error).toContain("Unknown shell: bogus");
+      expect(bad.error).toContain("bash|zsh|fish");
+    }
+  });
+
+  test("resolveCompletions accepts case-insensitive shell names", () => {
+    const ok = resolveCompletions("Zsh");
+    expect(ok.ok).toBe(true);
+    if (ok.ok) expect(ok.script).toContain("#compdef");
   });
 });

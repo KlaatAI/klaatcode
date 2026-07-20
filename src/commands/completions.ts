@@ -233,13 +233,27 @@ export function getCompletionScript(shell: CompletionShell): string {
   return body.endsWith("\n") ? body : body + "\n";
 }
 
-export function runCompletions(shellArg: string): void {
+export type CompletionsResult =
+  | { ok: true; script: string }
+  | { ok: false; error: string };
+
+/** Pure resolve — easy to unit-test without calling process.exit. */
+export function resolveCompletions(shellArg: string): CompletionsResult {
   const shell = shellArg.toLowerCase();
   if (!isCompletionShell(shell)) {
-    process.stderr.write(
-      `Unknown shell: ${shellArg}\nUsage: klaatai completions <bash|zsh|fish>\n`,
-    );
+    return {
+      ok: false,
+      error: `Unknown shell: ${shellArg}\nUsage: klaatai completions <bash|zsh|fish>\n`,
+    };
+  }
+  return { ok: true, script: getCompletionScript(shell) };
+}
+
+export function runCompletions(shellArg: string): void {
+  const result = resolveCompletions(shellArg);
+  if (!result.ok) {
+    process.stderr.write(result.error);
     process.exit(1);
   }
-  process.stdout.write(getCompletionScript(shell));
+  process.stdout.write(result.script);
 }
