@@ -1,12 +1,12 @@
 /**
- * Render the public-facing benchmark showcase (docs/final/BENCHMARKS.md)
+ * Render the public-facing benchmark showcase (docs/final/cli/BENCHMARKS.md)
  * from bench report JSONs. Regenerate after every bench run so the doc is
  * data, not lore:
  *
  *   bun bench/render-benchmarks-md.ts \
  *     reports/<klaatcode>.json reports/claude-*.json \
  *     reports/opencode-*.json reports/grok-*.json \
- *     > ../docs/final/BENCHMARKS.md      # run from bench/, or use abs paths
+ *     > ../docs/final/cli/BENCHMARKS.md      # run from bench/, or use abs paths
  *
  * First report = reference (KlaatCode). Emits:
  *   - headline + aggregate table (with cost ratios vs each rival)
