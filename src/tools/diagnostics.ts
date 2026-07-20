@@ -73,6 +73,25 @@ function commandFor(absPath: string, projectRoot: string): string[] | null {
     if (onPath("rubocop")) return ["rubocop", "--format", "emacs", "--no-color", absPath];
     return null;
   }
+  if (ext === ".swift") {
+    if (onPath("swiftlint")) return ["swiftlint", "lint", "--quiet", "--reporter", "xcode", absPath];
+    return null;
+  }
+  if (ext === ".php") {
+    // Prefer static analysis; fall back to Pint style check, then php -l syntax.
+    if (onPath("phpstan")) return ["phpstan", "analyse", "--no-progress", "--error-format=raw", absPath];
+    if (onPath("pint")) return ["pint", "--test", absPath];
+    if (onPath("php")) return ["php", "-l", absPath];
+    return null;
+  }
+  if (ext === ".kt" || ext === ".kts") {
+    if (onPath("ktlint")) return ["ktlint", "--reporter=plain", absPath];
+    return null;
+  }
+  if (ext === ".sh" || ext === ".bash" || ext === ".zsh") {
+    if (onPath("shellcheck")) return ["shellcheck", "-f", "gcc", absPath];
+    return null;
+  }
   if (ext === ".rs") {
     // cargo check is whole-crate/slow — only via explicit config override.
     return null;

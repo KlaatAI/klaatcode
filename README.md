@@ -161,7 +161,7 @@ The router escalates automatically when a task turns out harder than it looked a
 
 ### Post-Edit Diagnostics — the Model Sees Its Own Mistakes
 
-After a successful edit, Klaat Code runs your project's typechecker/linter on the changed file (auto-detects eslint/biome, ruff, gofmt, or a configured command) and hands any errors straight back to the model in the same turn — it fixes them before returning control to you, instead of costing you a round-trip.
+After a successful edit, Klaat Code runs your project's typechecker/linter on the changed file (auto-detects eslint/biome, ruff, gofmt, rubocop, swiftlint, phpstan/pint, ktlint, shellcheck, or a configured command) and hands any errors straight back to the model in the same turn — it fixes them before returning control to you, instead of costing you a round-trip.
 
 ### Terminal UI with Real Syntax Highlighting
 
