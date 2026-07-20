@@ -2,7 +2,11 @@
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runDiagnostics, configureDiagnostics } from "./diagnostics";
+import {
+  runDiagnostics,
+  configureDiagnostics,
+  resolveDiagnosticsCommand,
+} from "./diagnostics";
 
 let tmp: string;
 
@@ -75,7 +79,7 @@ describe("Swift diagnostics (.swift)", () => {
 });
 
 describe("PHP diagnostics (.php)", () => {
-  test("never throws; skips when phpstan/pint/php absent", () => {
+  test("never throws; skips when phpstan/pint absent", () => {
     const absPath = join(tmp, "foo.php");
     writeFileSync(absPath, "<?php echo 1;\n");
     expectSoftResult(absPath);
@@ -110,7 +114,7 @@ describe("Kotlin diagnostics (.kt / .kts)", () => {
   });
 });
 
-describe("Shell diagnostics (.sh / .bash / .zsh)", () => {
+describe("Shell diagnostics (.sh / .bash)", () => {
   test("never throws for .sh when shellcheck absent", () => {
     const absPath = join(tmp, "script.sh");
     writeFileSync(absPath, "#!/bin/sh\necho hi\n");
@@ -123,11 +127,58 @@ describe("Shell diagnostics (.sh / .bash / .zsh)", () => {
     expectSoftResult(absPath);
   });
 
+  test("does not run shellcheck on .zsh (unsupported)", () => {
+    const absPath = join(tmp, "script.zsh");
+    writeFileSync(absPath, "#!/bin/zsh\necho hi\n");
+    const cmd = resolveDiagnosticsCommand(absPath, tmp, { onPath: () => true });
+    expect(cmd).toBeNull();
+  });
+
   test("returns null when diagnostics disabled", () => {
     configureDiagnostics({ enabled: false });
     const absPath = join(tmp, "x.sh");
     writeFileSync(absPath, "#!/bin/sh\ntrue\n");
     expect(runDiagnostics(absPath, tmp)).toBeNull();
+  });
+});
+
+describe("resolveDiagnosticsCommand — positive PATH stubs", () => {
+  const present = (name: string) => (cmd: string) => cmd === name;
+
+  test("swiftlint argv", () => {
+    const abs = join(tmp, "A.swift");
+    const cmd = resolveDiagnosticsCommand(abs, tmp, { onPath: present("swiftlint") });
+    expect(cmd).toEqual(["swiftlint", "lint", "--quiet", "--reporter", "xcode", abs]);
+  });
+
+  test("phpstan preferred over pint", () => {
+    const abs = join(tmp, "a.php");
+    const cmd = resolveDiagnosticsCommand(abs, tmp, {
+      onPath: (c) => c === "phpstan" || c === "pint",
+    });
+    expect(cmd![0]).toBe("phpstan");
+    expect(cmd).toContain(abs);
+  });
+
+  test("pint used when phpstan absent; php alone is not enough", () => {
+    const abs = join(tmp, "a.php");
+    expect(resolveDiagnosticsCommand(abs, tmp, { onPath: present("pint") })![0]).toBe("pint");
+    expect(resolveDiagnosticsCommand(abs, tmp, { onPath: present("php") })).toBeNull();
+  });
+
+  test("ktlint argv has no --reporter flag", () => {
+    const abs = join(tmp, "A.kt");
+    expect(resolveDiagnosticsCommand(abs, tmp, { onPath: present("ktlint") }))
+      .toEqual(["ktlint", abs]);
+  });
+
+  test("shellcheck argv for .sh and .bash", () => {
+    const sh = join(tmp, "a.sh");
+    const bash = join(tmp, "a.bash");
+    expect(resolveDiagnosticsCommand(sh, tmp, { onPath: present("shellcheck") }))
+      .toEqual(["shellcheck", "-f", "gcc", sh]);
+    expect(resolveDiagnosticsCommand(bash, tmp, { onPath: present("shellcheck") }))
+      .toEqual(["shellcheck", "-f", "gcc", bash]);
   });
 });
 
