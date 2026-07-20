@@ -32,6 +32,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { spawnSync as _openBrowser } from "node:child_process";
 import { version as VERSION } from "../package.json";
 import { loadProjectRules } from "./agent/system-prompt.js";
+import { runAcpServer } from "./acp/agent.js";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -727,6 +728,15 @@ program
   .option("--base-url <url>", "API base URL override")
   .action(async (opts: { port: string; apiKey?: string; baseUrl?: string }) => {
     await runServe({ port: parseInt(opts.port, 10) || 4200, apiKey: opts.apiKey, baseUrl: opts.baseUrl });
+  });
+
+// ── klaatai acp ───────────────────────────────────────────────────────────────
+
+program
+  .command("acp")
+  .description("Run as an ACP (Agent Client Protocol) server over stdio — for Zed, Neovim, and other ACP editors")
+  .action(() => {
+    runAcpServer();
   });
 
 // ── klaatai web ───────────────────────────────────────────────────────────────

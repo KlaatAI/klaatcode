@@ -85,7 +85,7 @@ function persistOversized(s: string, label: string): string {
 /**
  * Resolve a path relative to projectRoot, or return as-is if absolute.
  */
-function safeResolve(projectRoot: string, filePath: string): string {
+export function safeResolve(projectRoot: string, filePath: string): string {
   if (filePath.startsWith("/") || filePath.startsWith("~")) {
     return filePath.replace(/^~/, process.env["HOME"] ?? "~");
   }
