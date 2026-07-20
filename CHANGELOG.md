@@ -3,6 +3,21 @@
 All notable changes to Klaat Code are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## [2.2.5] — 2026-07-21
+
+### Fixed
+
+- **Windows login broken — browser auth now works on Windows.** Three issues combined to break the OAuth redirect on Windows: (1) `cmd.exe`'s `start` command misinterpreted `&` in the login URL as a command separator, truncating query params — fixed by using `spawn` with an explicit arg array that bypasses shell interpretation; (2) the local callback server bound only to `127.0.0.1` which some Windows firewall configs block — now binds to `0.0.0.0` on Windows; (3) the redirect URI used `127.0.0.1` which some browsers resolve to IPv6 `[::1]` — now uses `localhost` on Windows for correct resolution. ([#47](https://github.com/KlaatAI/klaatcode/issues/47))
+
+### Added
+
+- **Shell completions (bash / zsh / fish).** `klaatcode completions bash|zsh|fish` prints a static completion script — works in the compiled binary without reading from disk. Covers both `klaatcode` and `klaatai` binary names. Thanks [@Ayush7614](https://github.com/Ayush7614)! ([#46](https://github.com/KlaatAI/klaatcode/pull/46))
+
+### Changed
+
+- **`pull-from-public.sh`** now recommends `patch -p1` instead of `git apply` (which silently skips patches in monorepo layouts).
+- **Fallback URL display** — if the browser doesn't open on any platform, the full login URL is printed to the terminal after 2 seconds so users can copy-paste manually.
+
 ## [2.2.4] — 2026-07-20
 
 Six features no other CLI coding agent ships built-in — token efficiency and runaway-protection, all on by default, all with an `off` switch. Plus the first two community contributions.
