@@ -14,7 +14,7 @@
 
 import { createServer } from "node:http";
 import { type AddressInfo } from "node:net";
-import { execSync } from "node:child_process";
+import { execSync, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { type Credentials } from "./credentials.js";
 
@@ -26,9 +26,20 @@ export type StatusFn = (msg: string) => void;
 export function openBrowser(url: string): void {
   try {
     const p = process.platform;
-    if (p === "darwin")      execSync(`open "${url}"`,         { stdio: "ignore" });
-    else if (p === "win32")  execSync(`start "" "${url}"`,     { stdio: "ignore" });
-    else                     execSync(`xdg-open "${url}"`,     { stdio: "ignore" });
+    if (p === "darwin") {
+      execSync(`open "${url}"`, { stdio: "ignore" });
+    } else if (p === "win32") {
+      // cmd.exe's `start` can misinterpret `&` in URLs as a command separator
+      // even inside quotes. Using spawn with an explicit arg array avoids shell
+      // interpretation entirely. The empty string is the window title.
+      spawn("cmd.exe", ["/c", "start", "", url], {
+        stdio: "ignore",
+        detached: true,
+        windowsHide: true,
+      }).unref();
+    } else {
+      execSync(`xdg-open "${url}"`, { stdio: "ignore" });
+    }
   } catch {
     // Swallow — we'll show the URL to the user as fallback
   }
@@ -185,9 +196,15 @@ export async function startOAuthBrowserAuth(
 
     server.on("error", () => settle(null));
 
-    server.listen(0, "127.0.0.1", () => {
+    // Bind to 127.0.0.1 on non-Windows; on Windows also accept localhost
+    // connections since some browsers/firewalls route differently.
+    const bindHost = process.platform === "win32" ? "0.0.0.0" : "127.0.0.1";
+
+    server.listen(0, bindHost, () => {
       const port = (server.address() as AddressInfo).port;
-      const redirectUri = `http://127.0.0.1:${port}/callback`;
+      // Use localhost on Windows (avoids IPv4/IPv6 mismatch issues in browsers)
+      const loopback = process.platform === "win32" ? "localhost" : "127.0.0.1";
+      const redirectUri = `http://${loopback}:${port}/callback`;
 
       const loginUrl =
         `${webUrl.replace(/\/$/, "")}/klaatu/cli-auth` +
@@ -200,7 +217,8 @@ export async function startOAuthBrowserAuth(
 
       onStatus("Opening browser…");
       openBrowser(loginUrl);
-      setTimeout(() => onStatus(`Waiting for browser login…  ${loginUrl}`), 1500);
+      // Show the URL quickly as fallback so user can copy-paste if browser fails
+      setTimeout(() => onStatus(`Waiting for browser login…\n  If the browser didn't open, visit:\n  ${loginUrl}`), 2000);
     });
 
     const timer = setTimeout(() => {
