@@ -58,6 +58,7 @@ import { dialectForTier, toolsForDialect, dialectIncludesExtras, type ToolDialec
 import { PluginRegistry } from "../tools/plugins.js";
 import { configureDiagnostics } from "../tools/diagnostics.js";
 import { setOutputFilterEnabled } from "../tools/output-filter.js";
+import { expandSkill, formatSkillLocation, loadSkills } from "../skills/loader.js";
 import { PhaseTracker } from "../agent/phase-budget.js";
 import { collectCriticalState, checkSummaryCoverage } from "../agent/collapse-check.js";
 import { killAllBackground } from "../tools/background.js";
@@ -1250,67 +1251,11 @@ export async function runREPL(
     });
   }
 
-  // ─── Skills ───────────────────────────────────────────────────────────────
-  // v2: optional YAML frontmatter between --- fences:
-  //   ---
-  //   name: fix-types        (overrides filename)
-  //   description: Fix all TS type errors
-  //   args: [file or dir]    (usage hint shown in the list)
-  //   ---
-  // Body may reference $ARGUMENTS — replaced with whatever follows the skill
-  // name at invocation (`/skill fix-types src/` or `/fix-types src/`).
-
-  interface Skill {
-    name: string; path: string; content: string; scope: "project" | "global";
-    description?: string; argsHint?: string;
-  }
-
-  function parseSkillFile(raw: string): { meta: Record<string, string>; body: string } {
-    const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(raw);
-    if (!m) return { meta: {}, body: raw.trim() };
-    const meta: Record<string, string> = {};
-    for (const line of m[1]!.split("\n")) {
-      const kv = /^([\w-]+):\s*(.*)$/.exec(line.trim());
-      if (kv) meta[kv[1]!.toLowerCase()] = kv[2]!.trim().replace(/^["'\[]|["'\]]$/g, "");
-    }
-    return { meta, body: raw.slice(m[0].length).trim() };
-  }
-
-  function loadSkills(): Skill[] {
-    const skills: Skill[] = [];
-    const dirs: Array<{ dir: string; scope: "project" | "global" }> = [
-      { dir: join(homedir(), ".klaatai", "skills"), scope: "global" },
-      { dir: join(projectRoot, ".klaatai", "skills"),  scope: "project" },
-    ];
-    for (const { dir, scope } of dirs) {
-      if (!existsSync(dir)) continue;
-      try {
-        for (const f of readdirSync(dir)) {
-          if (!f.endsWith(".md")) continue;
-          const p = join(dir, f);
-          try {
-            const { meta, body } = parseSkillFile(readFileSync(p, "utf-8"));
-            skills.push({
-              name: meta["name"] || f.replace(/\.md$/, ""),
-              path: p,
-              content: body,
-              scope,
-              description: meta["description"],
-              argsHint: meta["args"],
-            });
-          } catch { /* skip unreadable */ }
-        }
-      } catch { /* skip unreadable dir */ }
-    }
-    return skills;
-  }
-
-  /** Expand a skill body with invocation arguments ($ARGUMENTS placeholder). */
-  function expandSkill(skill: Skill, args: string): string {
-    if (skill.content.includes("$ARGUMENTS")) {
-      return skill.content.replaceAll("$ARGUMENTS", args || "(none)");
-    }
-    return args ? `${skill.content}\n\nArguments: ${args}` : skill.content;
+  function skillLoadOptions() {
+    return {
+      projectRoot,
+      importClaudeSkills: config.compat?.importClaudeSkills !== false,
+    };
   }
 
   // ─── Hooks ────────────────────────────────────────────────────────────────
@@ -2911,14 +2856,15 @@ export async function runREPL(
         // ── /skill — prompt template skills ───────────────────────────────
         if (slash === "/skill" || slash === "/skills") {
           const arg = parts.slice(1).join(" ").trim();
-          const allSkills = loadSkills();
+          const allSkills = loadSkills(skillLoadOptions());
 
           // /skill list or bare /skill
           if (!arg || arg === "list") {
             if (allSkills.length === 0) {
               pushSystemMsg(
                 "No skills found.\n\n" +
-                "Create a skill: save a `.md` file in `.klaatai/skills/` (project) or `~/.klaatai/skills/` (global).\n\n" +
+                "Create a skill: save a `.md` file in `.klaatai/skills/` (project) or `~/.klaatai/skills/` (global).\n" +
+                "Claude Code skills in `.claude/skills/<name>/SKILL.md` are also discovered when compat is enabled.\n\n" +
                 "Example: `echo '# Fix Types\\nFix all TypeScript type errors in the project.' > .klaatai/skills/fix-types.md`",
               );
             } else {
@@ -2926,7 +2872,7 @@ export async function runREPL(
               for (const s of allSkills) {
                 const desc = s.description ?? s.content.split("\n")[0]!.replace(/^#+\s*/, "").slice(0, 60);
                 const hint = s.argsHint ? ` \`${s.argsHint}\`` : "";
-                lines.push(`  **${s.name}**${hint} *(${s.scope})* — ${desc}`);
+                lines.push(`  **${s.name}**${hint} *(${formatSkillLocation(s)})* — ${desc}`);
               }
               lines.push("\nUsage: `/skill <name> [args]` or directly `/<name> [args]` · `/skill new <name>` to create");
               pushSystemMsg(lines.join("\n"));
@@ -3006,7 +2952,7 @@ export async function runREPL(
         {
           const name = slash.slice(1);
           const rest = parts.slice(1).join(" ").trim();
-          const skill = loadSkills().find(s => s.name === name);
+          const skill = loadSkills(skillLoadOptions()).find(s => s.name === name);
           if (skill) {
             pushSystemMsg(`Invoking skill **${skill.name}**${rest ? ` with \`${rest}\`` : ""}…`);
             void sendMessage(expandSkill(skill, rest));

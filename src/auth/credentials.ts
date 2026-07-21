@@ -63,6 +63,11 @@ export interface Config {
   maxSessionCost?: number;
   /** Per-phase soft token budgets (9.5): "on" (default) or "off". */
   phaseBudgets?: "on" | "off";
+  /** Cross-tool compatibility toggles. */
+  compat?: {
+    /** Discover skills from ~/.claude/skills and .claude/skills (default: true). */
+    importClaudeSkills?: boolean;
+  };
 }
 
 export interface CustomModelConfig {
