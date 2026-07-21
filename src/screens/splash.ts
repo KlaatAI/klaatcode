@@ -47,6 +47,7 @@ interface SplashState {
   status:      string;
   projectPath?: string;
   accent:      string;
+  version:     string;
   spinner:     Spinner;
   pulse:       PulseBar;
 }
@@ -75,7 +76,7 @@ function drawSplash(buf: CellBuffer, area: Rect, st: SplashState): void {
   row += WM_H + 1;
 
   // ── Version tagline ─────────────────────────────────────────────────────────
-  const tagline = "CLI v0.1.0  ·  Smart models  ·  Smart Way to Develop";
+  const tagline = `KlaatCode v${st.version}  ·  Smart models  ·  Smart Way to Develop`;
   drawTextLine(buf, { x: area.x, y: row, width: cols, height: 1 }, row,
     tagline, { fg: "gray", dim: true }, { align: "center" });
   row++;
@@ -107,12 +108,42 @@ function drawSplash(buf: CellBuffer, area: Rect, st: SplashState): void {
   row += 2;
 
   // ── Spinner + status ────────────────────────────────────────────────────────
+  const statusLines = st.status.split("\n");
+  const firstLine = statusLines[0] ?? "";
   const spinnerStr = st.spinner.frame + " ";
-  const statusLine = spinnerStr + st.status;
+  const statusLine = spinnerStr + firstLine;
   const statusX = Math.floor((cols - stringWidth(statusLine)) / 2);
   buf.write(row, statusX, spinnerStr, { fg: "magenta" });
-  buf.write(row, statusX + stringWidth(spinnerStr), st.status, { fg: "cyan" });
-  row += 2;
+  buf.write(row, statusX + stringWidth(spinnerStr), firstLine, { fg: "cyan" });
+  row++;
+
+  // Render additional lines (e.g. fallback URL) with proper wrapping
+  for (let li = 1; li < statusLines.length; li++) {
+    const line = statusLines[li]!.trim();
+    if (!line) { row++; continue; }
+
+    const isUrl = /^https?:\/\//.test(line);
+    const maxW = cols - 6; // leave 3 char margin each side
+
+    if (isUrl) {
+      // Wrap URL into chunks that fit terminal width
+      const chunks: string[] = [];
+      for (let i = 0; i < line.length; i += maxW) {
+        chunks.push(line.slice(i, i + maxW));
+      }
+      for (const chunk of chunks) {
+        const cx = area.x + 3;
+        buf.write(row, cx, chunk, { fg: "#58a6ff", underline: true });
+        row++;
+      }
+    } else {
+      const truncated = stringWidth(line) > maxW ? line.slice(0, maxW - 1) + "…" : line;
+      const lx = Math.floor((cols - stringWidth(truncated)) / 2);
+      buf.write(row, lx, truncated, { fg: "gray", dim: true });
+      row++;
+    }
+  }
+  row++;
 
   // ── Footer ──────────────────────────────────────────────────────────────────
   const footer = "Ctrl+C to cancel  ·  klaatai.com";
@@ -129,12 +160,13 @@ export interface SplashHandle {
 
 export async function runSplash(
   app:  App,
-  opts: { status?: string; projectPath?: string; accent?: string } = {},
+  opts: { status?: string; projectPath?: string; accent?: string; version?: string } = {},
 ): Promise<SplashHandle> {
   const state: SplashState = {
     status:      opts.status ?? "Starting…",
     projectPath: opts.projectPath,
     accent:      opts.accent ?? "#d8b4fe",
+    version:     opts.version ?? "0.0.0",
     spinner:     new Spinner(SPINNER_DOTS, 80),
     pulse:       new PulseBar(),
   };

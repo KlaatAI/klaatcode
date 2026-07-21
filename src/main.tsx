@@ -233,7 +233,7 @@ async function boot(opts: { baseUrl?: string; dir?: string; resumeId?: string } 
   const appDone = app.run(() => { /* initial empty render — splash mounts next tick */ });
 
   // ── 2. Show Splash ─────────────────────────────────────────────────────────
-  const splash = await runSplash(app, { status: "Initializing…", projectPath: projectRoot, accent: getPalette(theme).accent });
+  const splash = await runSplash(app, { status: "Initializing…", projectPath: projectRoot, accent: getPalette(theme).accent, version: VERSION });
   await sleep(300);
 
   // ── 3. Resolve API key ─────────────────────────────────────────────────────
@@ -495,7 +495,7 @@ program
     const app    = new App();
     app.onKey("ctrl+c", () => app.quit());
     const appDone = app.run(() => {});
-    const splash  = await runSplash(app, { status: "Opening browser to sign in…" });
+    const splash  = await runSplash(app, { status: "Opening browser to sign in…", version: VERSION });
     // OAuth (subscription JWT — quota/units + tier hints honored). No API-key path.
     const oauthCreds = await startOAuthBrowserAuth(webUrl, baseUrl, splash.setSplashStatus, 120_000);
     if (oauthCreds?.accessToken) {

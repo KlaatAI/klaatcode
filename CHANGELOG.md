@@ -3,6 +3,14 @@
 All notable changes to Klaat Code are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## [2.2.8] — 2026-07-21
+
+### Fixed
+
+- **Version display** — Splash screen now shows "KlaatCode v2.2.8" instead of hardcoded "CLI v0.1.0".
+- **Fallback URL overflow** — When browser fails to auto-open, the auth URL no longer bleeds into other UI components. Long URLs are now wrapped to fit the terminal width.
+- **Fallback URL visibility** — Auth URL displayed in blue underlined text, auto-detected as clickable by modern terminals (Windows Terminal, iTerm2, VS Code terminal).
+
 ## [2.2.7] — 2026-07-21
 
 ### Fixed
