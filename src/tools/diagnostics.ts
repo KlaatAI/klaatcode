@@ -35,15 +35,29 @@ function hasLocalBin(projectRoot: string, bin: string): boolean {
 }
 
 /** Is a command available on PATH? */
-function onPath(cmd: string): boolean {
+function onPathDefault(cmd: string): boolean {
   try {
     const r = spawnSync(process.platform === "win32" ? "where" : "which", [cmd], { timeout: 2000 });
     return r.status === 0;
   } catch { return false; }
 }
 
-/** Choose a fast per-file diagnostics command for a file, or null. */
-function commandFor(absPath: string, projectRoot: string): string[] | null {
+export interface CommandResolveDeps {
+  onPath?: (cmd: string) => boolean;
+  hasLocalBin?: (projectRoot: string, bin: string) => boolean;
+}
+
+/**
+ * Choose a fast per-file diagnostics command for a file, or null.
+ * Exported so tests can inject PATH/local-bin stubs and assert argv shape.
+ */
+export function resolveDiagnosticsCommand(
+  absPath: string,
+  projectRoot: string,
+  deps: CommandResolveDeps = {},
+): string[] | null {
+  const onPath = deps.onPath ?? onPathDefault;
+  const localBin = deps.hasLocalBin ?? hasLocalBin;
   const ext = extname(absPath).toLowerCase();
 
   // Explicit config override wins.
@@ -52,10 +66,10 @@ function commandFor(absPath: string, projectRoot: string): string[] | null {
 
   if ([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"].includes(ext)) {
     // Prefer a locally-installed linter (fast, per-file). Never npx-install.
-    if (hasLocalBin(projectRoot, "eslint")) {
+    if (localBin(projectRoot, "eslint")) {
       return [join(projectRoot, "node_modules", ".bin", "eslint"), "--no-color", "--format", "unix", absPath];
     }
-    if (hasLocalBin(projectRoot, "biome")) {
+    if (localBin(projectRoot, "biome")) {
       return [join(projectRoot, "node_modules", ".bin", "biome"), "check", "--no-colors", absPath];
     }
     return null;
@@ -73,6 +87,26 @@ function commandFor(absPath: string, projectRoot: string): string[] | null {
     if (onPath("rubocop")) return ["rubocop", "--format", "emacs", "--no-color", absPath];
     return null;
   }
+  if (ext === ".swift") {
+    if (onPath("swiftlint")) return ["swiftlint", "lint", "--quiet", "--reporter", "xcode", absPath];
+    return null;
+  }
+  if (ext === ".php") {
+    // Static analysis / style only — no php -l fallback (syntax-only is a different semantic level).
+    if (onPath("phpstan")) return ["phpstan", "analyse", "--no-progress", "--error-format=raw", absPath];
+    if (onPath("pint")) return ["pint", "--test", absPath];
+    return null;
+  }
+  if (ext === ".kt" || ext === ".kts") {
+    // No --reporter flag: ktlint 1.x changed reporter CLI; default plain output is fine.
+    if (onPath("ktlint")) return ["ktlint", absPath];
+    return null;
+  }
+  if (ext === ".sh" || ext === ".bash") {
+    // shellcheck does not support zsh — do not include .zsh (false positives).
+    if (onPath("shellcheck")) return ["shellcheck", "-f", "gcc", absPath];
+    return null;
+  }
   if (ext === ".rs") {
     // cargo check is whole-crate/slow — only via explicit config override.
     return null;
@@ -86,7 +120,7 @@ function commandFor(absPath: string, projectRoot: string): string[] | null {
  */
 export function runDiagnostics(absPath: string, projectRoot: string): string | null {
   if (!cfg.enabled) return null;
-  const cmd = commandFor(absPath, projectRoot);
+  const cmd = resolveDiagnosticsCommand(absPath, projectRoot);
   if (!cmd) return null;
 
   let out: string;
