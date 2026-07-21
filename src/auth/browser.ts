@@ -29,19 +29,49 @@ export function openBrowser(url: string): void {
     if (p === "darwin") {
       execSync(`open "${url}"`, { stdio: "ignore" });
     } else if (p === "win32") {
-      // Neither cmd.exe `start` nor spawn through cmd.exe are safe — cmd always
-      // interprets `&` as a command separator regardless of quoting or arg arrays.
-      // Use PowerShell's Start-Process which handles URLs with special chars correctly.
-      spawn("powershell.exe", ["-NoProfile", "-Command", `Start-Process "${url}"`], {
-        stdio: "ignore",
-        detached: true,
-        windowsHide: true,
-      }).unref();
+      // Try multiple methods — some Windows configs block certain approaches.
+      // 1. explorer.exe handles URLs natively without shell interpretation issues
+      // 2. PowerShell Start-Process as backup
+      // 3. rundll32 as final fallback
+      let opened = false;
+      try {
+        execSync(`explorer "${url}"`, { stdio: "ignore", windowsHide: true });
+        opened = true;
+      } catch { /* explorer failed, try next */ }
+      if (!opened) {
+        try {
+          execSync(`powershell.exe -NoProfile -Command "Start-Process '${url.replace(/'/g, "''")}'"`
+            , { stdio: "ignore", windowsHide: true, timeout: 5000 });
+          opened = true;
+        } catch { /* powershell failed, try next */ }
+      }
+      if (!opened) {
+        try {
+          execSync(`rundll32 url.dll,FileProtocolHandler "${url}"`, { stdio: "ignore", windowsHide: true });
+        } catch { /* all methods failed — fallback URL will show */ }
+      }
     } else {
       execSync(`xdg-open "${url}"`, { stdio: "ignore" });
     }
   } catch {
     // Swallow — we'll show the URL to the user as fallback
+  }
+}
+
+/** Copy text to system clipboard. Best-effort, never throws. */
+function copyToClipboard(text: string): boolean {
+  try {
+    const p = process.platform;
+    if (p === "darwin") {
+      execSync("pbcopy", { input: text, stdio: ["pipe", "ignore", "ignore"] });
+    } else if (p === "win32") {
+      execSync("clip", { input: text, stdio: ["pipe", "ignore", "ignore"] });
+    } else {
+      execSync("xclip -selection clipboard", { input: text, stdio: ["pipe", "ignore", "ignore"] });
+    }
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -217,8 +247,15 @@ export async function startOAuthBrowserAuth(
 
       onStatus("Opening browser…");
       openBrowser(loginUrl);
-      // Show the URL quickly as fallback so user can copy-paste if browser fails
-      setTimeout(() => onStatus(`Waiting for browser login…\n  If the browser didn't open, visit:\n  ${loginUrl}`), 2000);
+
+      // After 2s, show fallback URL and copy to clipboard for easy pasting
+      setTimeout(() => {
+        const copied = copyToClipboard(loginUrl);
+        const hint = copied
+          ? "URL copied to clipboard — paste in browser"
+          : "Copy this URL and open in browser:";
+        onStatus(`Waiting for browser login…\n${hint}\n${loginUrl}`);
+      }, 2000);
     });
 
     const timer = setTimeout(() => {

@@ -3,6 +3,13 @@
 All notable changes to Klaat Code are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## [2.2.9] — 2026-07-21
+
+### Fixed
+
+- **Windows browser auto-open** — Now tries 3 methods in sequence: `explorer.exe` (most reliable, no shell interpretation), `powershell.exe Start-Process`, and `rundll32 url.dll` as final fallback. Covers machines where PowerShell is blocked or not in PATH.
+- **URL not copyable in TUI** — When browser fails to open, the auth URL is now **auto-copied to clipboard** (`clip` on Windows, `pbcopy` on macOS, `xclip` on Linux). User sees "URL copied to clipboard — paste in browser" instead of trying to select text from the TUI alt-screen.
+
 ## [2.2.8] — 2026-07-21
 
 ### Fixed
