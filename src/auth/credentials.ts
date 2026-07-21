@@ -90,7 +90,7 @@ export function resolveCustomModelKey(m: CustomModelConfig): string | null {
 }
 
 const DEFAULT_CONFIG: Config = {
-  baseUrl: "http://127.0.0.1:8765",
+  baseUrl: "https://api.klaatai.com",
   routingDisplay: "minimal",
   theme: "dark",
   vimMode: false,
