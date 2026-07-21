@@ -3,6 +3,18 @@
 All notable changes to Klaat Code are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## [2.2.6] — 2026-07-21
+
+### Fixed
+
+- **Windows (and all new installs) pointed at localhost instead of production API.** The default `baseUrl` in `DEFAULT_CONFIG` was `http://127.0.0.1:8765` (the local dev server). Fresh installs with no `~/.klaatai/config.json` would open the browser to `http://localhost:4410/klaatu/cli-auth` — which doesn't exist on user machines. Default is now `https://api.klaatai.com`, so login correctly opens `https://klaatai.com/klaatu/cli-auth`. Existing installs with a config file are unaffected.
+
+### Added
+
+- **Claude Code skills compatibility** — `.claude/skills` directory is now auto-discovered alongside `.klaatai/skills`. Thanks [@syf2211](https://github.com/syf2211)! ([#43](https://github.com/KlaatAI/klaatcode/pull/43))
+- **`/export` slash command** — export the current session to a Markdown file. Thanks [@Ayush7614](https://github.com/Ayush7614)! ([#45](https://github.com/KlaatAI/klaatcode/pull/45))
+- **Swift, PHP, Kotlin, Shell post-edit diagnostics** — the feedback loop now runs `swiftc`, `php -l`, `kotlinc`, and `shellcheck` when available. Thanks [@Ayush7614](https://github.com/Ayush7614)! ([#44](https://github.com/KlaatAI/klaatcode/pull/44))
+
 ## [2.2.5] — 2026-07-21
 
 ### Fixed
