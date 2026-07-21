@@ -74,6 +74,10 @@ import { compactMessagesForApi } from "../agent/compaction.js";
 import { stripStrayTextToolCallArtifacts } from "../agent/text-tool-artifacts.js";
 import { drawWelcomeCard } from "./welcome-card.js";
 import {
+  renderSessionMarkdown,
+  resolveExportPath,
+} from "./export-session.js";
+import {
   TIER_COSTS, VALID_TIERS, TIER_CONTEXT_WINDOW, SAFE_CONTEXT_BUDGET,
   TIER_COLOR_MAP, KLAATU_MODEL_MAP, formatTok, formatElapsed,
 } from "./tiers.js";
@@ -694,7 +698,8 @@ export async function runREPL(
     { cmd: "/review",     desc: "AI code review of current git diff" },
     { cmd: "/rollback",   desc: "Restore files from a checkpoint" },
     { cmd: "/sessions",   desc: "List saved sessions" },
-    { cmd: "/share",      desc: "Export session to markdown" },
+    { cmd: "/export",     desc: "Export session to Markdown [path]" },
+    { cmd: "/share",      desc: "Alias for /export" },
     { cmd: "/skill",      desc: "Invoke a saved prompt skill" },
     { cmd: "/test",       desc: "Run the project test suite" },
     { cmd: "/theme",      desc: "Show or change the UI theme" },
@@ -2050,7 +2055,8 @@ export async function runREPL(
           "  /undo             — revert files written by the last AI response (via git)",
           "  /checkpoint [lbl] — snapshot modified files (max 10 kept)",
           "  /rollback [id]    — restore files from a checkpoint",
-          "  /share            — export current session to a markdown file",
+          "  /export [path]    — export current session to Markdown (default: ./klaatai-session-<id>.md)",
+          "  /share [path]     — alias for /export",
           "  /plugin list      — list installed plugins in ~/.klaatai/plugins/",
           "  /doctor           — diagnostics: auth, API, MCP, tools, config",
           "  /theme [name]     — show or change the UI theme",
@@ -2161,26 +2167,17 @@ export async function runREPL(
           return true;
         }
 
-        if (slash === "/share") {
-          const outPath = join(homedir(), `klaatai-session-${sessionId}.md`);
-          const mdLines: string[] = [
-            `# KlaatAI Session — ${sessionId}`,
-            `*Exported: ${new Date().toISOString().slice(0, 19)}*`,
-            "",
-          ];
-          for (const m of messages) {
-            if (m.role === "system") continue;
-            if (m.role === "user") {
-              mdLines.push(`## You\n\n${m.content}\n`);
-            } else if (m.role === "assistant" && m.kind !== "error") {
-              mdLines.push(`## Assistant\n\n${m.content}\n`);
-            } else if (m.role === "tool") {
-              mdLines.push(`### Tool: ${m.toolName ?? "unknown"}\n\n\`\`\`\n${m.content}\n\`\`\`\n`);
-            }
-          }
-          mdLines.push(`---\n*Session cost: $${sessionCost.toFixed(4)} | Requests: ${totalRequests}*`);
+        if (slash === "/export" || slash === "/share") {
+          const pathArg = parts.slice(1).join(" ").trim() || undefined;
+          const outPath = resolveExportPath(sessionId, pathArg);
+          const md = renderSessionMarkdown({
+            sessionId,
+            messages,
+            sessionCost,
+            totalRequests,
+          });
           try {
-            writeFileSync(outPath, mdLines.join("\n"), "utf-8");
+            writeFileSync(outPath, md, "utf-8");
             pushSystemMsg(`Session exported to **${outPath}**`);
           } catch (e) {
             pushSystemMsg(`Export failed: ${e instanceof Error ? e.message : String(e)}`, "error");
@@ -4716,7 +4713,7 @@ export async function runREPL(
       { label: "Sessions",        value: "sessions",   description: "List saved sessions",                  color: "cyan" },
       { label: "Compact Context", value: "compact",    description: "Summarise to free context window",     color: "yellow" },
       { label: "Checkpoint",      value: "checkpoint", description: "Snapshot modified files for rollback", color: "#fb923c" },
-      { label: "Share / Export",  value: "share",      description: "Export session to markdown file",      color: "#f9a8d4" },
+      { label: "Export",          value: "export",     description: "Export session to Markdown file",     color: "#f9a8d4" },
       { label: "Git Diff",        value: "diff",       description: "Show git diff for all changes",        color: "#60a5fa" },
       { label: "Insert @ File",   value: "at",         description: "Pick a file to inject into message",  color: "#34d399" },
       { label: "Open in Editor",  value: "editor",     description: "Compose in $EDITOR (ctrl+x ctrl+e)",  color: "white" },
@@ -4779,8 +4776,8 @@ export async function runREPL(
         }
       } else if (item.value === "checkpoint") {
         handleSlashCommand("/checkpoint");
-      } else if (item.value === "share") {
-        handleSlashCommand("/share");
+      } else if (item.value === "export") {
+        handleSlashCommand("/export");
       } else if (item.value === "diff") {
         handleSlashCommand("/diff");
       } else if (item.value === "at") {

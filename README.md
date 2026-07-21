@@ -258,7 +258,8 @@ Every conversation is saved as a transcript in `~/.klaatai/sessions/`.
 ```
 /sessions       # list saved sessions
 /resume <id>    # pick up exactly where you left off
-/share          # export session to markdown
+/export         # export session to Markdown (optional path)
+/share          # alias for /export
 ```
 
 ### Permissions
@@ -354,7 +355,7 @@ This README covers the highlights. For every shell flag, slash command, config k
 | `/test [args]` | Run tests (auto-detects Bun/Vitest/Jest/pytest/Go/Cargo) |
 | `/skill <name>` · `/hooks` | Skills and hooks |
 | `/init` | Generate project rules from your stack |
-| `/sessions` · `/resume <id>` · `/share` | Session management |
+| `/sessions` · `/resume <id>` · `/export [path]` · `/share` | Session management |
 | `/mcp` | Manage MCP servers |
 | `/agents` | List agent personas + running background sub-agents |
 | `/perms` | Review tool permissions |
