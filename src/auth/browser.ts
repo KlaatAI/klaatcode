@@ -29,10 +29,10 @@ export function openBrowser(url: string): void {
     if (p === "darwin") {
       execSync(`open "${url}"`, { stdio: "ignore" });
     } else if (p === "win32") {
-      // cmd.exe's `start` can misinterpret `&` in URLs as a command separator
-      // even inside quotes. Using spawn with an explicit arg array avoids shell
-      // interpretation entirely. The empty string is the window title.
-      spawn("cmd.exe", ["/c", "start", "", url], {
+      // Neither cmd.exe `start` nor spawn through cmd.exe are safe — cmd always
+      // interprets `&` as a command separator regardless of quoting or arg arrays.
+      // Use PowerShell's Start-Process which handles URLs with special chars correctly.
+      spawn("powershell.exe", ["-NoProfile", "-Command", `Start-Process "${url}"`], {
         stdio: "ignore",
         detached: true,
         windowsHide: true,

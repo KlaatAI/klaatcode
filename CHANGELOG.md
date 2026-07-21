@@ -3,6 +3,12 @@
 All notable changes to Klaat Code are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## [2.2.7] — 2026-07-21
+
+### Fixed
+
+- **Windows login STILL broken — `cmd.exe` truncates URL at `&` even via `spawn`.** The v2.2.5 fix used `spawn("cmd.exe", ["/c", "start", "", url])` but cmd.exe processes `&` as a command separator regardless of how it's invoked. Switched to `powershell.exe Start-Process` which correctly handles URLs containing `&`, `=`, and other special characters without interpretation. Windows users will now see the full auth page with all parameters intact.
+
 ## [2.2.6] — 2026-07-21
 
 ### Fixed
