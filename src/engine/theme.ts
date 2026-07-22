@@ -76,6 +76,68 @@ export const DARK_PALETTE: ThemePalette = {
   userFg:       219,
   assistantFg:  75,
 };
+/** Catppuccin Latte — light warm palette */
+export const CATPPUCCIN_LATTE_PALETTE: ThemePalette = {
+  accent:       "#8839ef",  // mauve
+  dimText:      "#acb0be",  // surface2
+  userColor:    "#40a02b",  // green
+  border:       "#ccd0da",  // surface0
+  thumb:        "#bcc0cc",
+  bg:           null,
+  inputBg:      255,
+  chatFg:       236,
+  mutedFg:      146,
+  toolFg:       240,
+  codeFg:       98,   // mauve approx
+  codeBg:       254,
+  headingFg:    16,
+  sidebarLabel: 146,
+  sidebarValue: 236,
+  userFg:       34,   // green approx
+  assistantFg:  98,   // mauve approx
+};
+
+/** Catppuccin Frappé — muted mid-tone palette */
+export const CATPPUCCIN_FRAPPE_PALETTE: ThemePalette = {
+  accent:       "#ca9ee6",  // mauve
+  dimText:      "#626880",  // surface2
+  userColor:    "#a6d189",  // green
+  border:       "#414559",  // surface0
+  thumb:        "#51576d",
+  bg:           null,
+  inputBg:      236,
+  chatFg:       252,
+  mutedFg:      60,
+  toolFg:       245,
+  codeFg:       182,  // mauve approx
+  codeBg:       237,
+  headingFg:    "white",
+  sidebarLabel: 60,
+  sidebarValue: 252,
+  userFg:       150,  // green approx
+  assistantFg:  182,  // mauve approx
+};
+
+/** Catppuccin Macchiato — dark with teal-tinged surface */
+export const CATPPUCCIN_MACCHIATO_PALETTE: ThemePalette = {
+  accent:       "#c6a0f6",  // mauve
+  dimText:      "#5b6078",  // surface2
+  userColor:    "#a6da95",  // green
+  border:       "#363a4f",  // surface0
+  thumb:        "#494d64",
+  bg:           null,
+  inputBg:      235,
+  chatFg:       252,
+  mutedFg:      60,
+  toolFg:       245,
+  codeFg:       183,  // mauve approx
+  codeBg:       236,
+  headingFg:    "white",
+  sidebarLabel: 60,
+  sidebarValue: 252,
+  userFg:       150,  // green approx
+  assistantFg:  183,  // mauve approx
+};
 
 export const LIGHT_PALETTE: ThemePalette = {
   accent:       "#7c3aed",
@@ -356,6 +418,9 @@ export type Theme =
   | "nord"
   | "ayu"
   | "catppuccin"
+  | "catppuccin-latte"
+  | "catppuccin-frappe"
+  | "catppuccin-macchiato"
   | "gruvbox"
   | "neon"
   | "synthwave"
@@ -366,8 +431,9 @@ export type Theme =
   | "tokyo-night";
 
 export const THEME_NAMES: Theme[] = [
-  "dark", "light", "dracula", "nord", "ayu", "catppuccin", "gruvbox",
-  "neon", "synthwave", "ember", "matrix", "cobalt", "midnight", "tokyo-night",
+  "dark", "light", "dracula", "nord", "ayu",
+  "catppuccin", "catppuccin-latte", "catppuccin-frappe", "catppuccin-macchiato",
+  "gruvbox", "neon", "synthwave", "ember", "matrix", "cobalt", "midnight", "tokyo-night",
 ];
 
 export const THEME_DESCRIPTIONS: Record<Theme, string> = {
@@ -377,6 +443,9 @@ export const THEME_DESCRIPTIONS: Record<Theme, string> = {
   nord:       "Nord — cool arctic blue-grey palette",
   ayu:        "Ayu Dark — warm dark with golden accent",
   catppuccin: "Catppuccin Mocha — pastel dark palette",
+  "catppuccin-latte":    "Catppuccin Latte — warm light pastel palette",
+  "catppuccin-frappe":   "Catppuccin Frappé — muted mid-tone pastel palette",
+  "catppuccin-macchiato":"Catppuccin Macchiato — dark teal-tinged pastel palette",
   gruvbox:    "Gruvbox Dark — earthy retro palette",
   neon:       "Neon — electric blue with vibrant cyan glow",
   synthwave:  "Synthwave — retro 80s sunset magenta vibes",
@@ -394,6 +463,9 @@ export function getPalette(theme: Theme): ThemePalette {
     case "nord":       return NORD_PALETTE;
     case "ayu":        return AYU_PALETTE;
     case "catppuccin": return CATPPUCCIN_PALETTE;
+    case "catppuccin-latte":      return CATPPUCCIN_LATTE_PALETTE;
+    case "catppuccin-frappe":     return CATPPUCCIN_FRAPPE_PALETTE;
+    case "catppuccin-macchiato":  return CATPPUCCIN_MACCHIATO_PALETTE;
     case "gruvbox":    return GRUVBOX_PALETTE;
     case "neon":       return NEON_PALETTE;
     case "synthwave":  return SYNTHWAVE_PALETTE;
