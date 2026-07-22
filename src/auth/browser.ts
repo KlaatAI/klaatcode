@@ -14,7 +14,7 @@
 
 import { createServer } from "node:http";
 import { type AddressInfo } from "node:net";
-import { execSync } from "node:child_process";
+import { execSync, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { type Credentials } from "./credentials.js";
 
@@ -26,11 +26,52 @@ export type StatusFn = (msg: string) => void;
 export function openBrowser(url: string): void {
   try {
     const p = process.platform;
-    if (p === "darwin")      execSync(`open "${url}"`,         { stdio: "ignore" });
-    else if (p === "win32")  execSync(`start "" "${url}"`,     { stdio: "ignore" });
-    else                     execSync(`xdg-open "${url}"`,     { stdio: "ignore" });
+    if (p === "darwin") {
+      execSync(`open "${url}"`, { stdio: "ignore" });
+    } else if (p === "win32") {
+      // Try multiple methods — some Windows configs block certain approaches.
+      // 1. explorer.exe handles URLs natively without shell interpretation issues
+      // 2. PowerShell Start-Process as backup
+      // 3. rundll32 as final fallback
+      let opened = false;
+      try {
+        execSync(`explorer "${url}"`, { stdio: "ignore", windowsHide: true });
+        opened = true;
+      } catch { /* explorer failed, try next */ }
+      if (!opened) {
+        try {
+          execSync(`powershell.exe -NoProfile -Command "Start-Process '${url.replace(/'/g, "''")}'"`
+            , { stdio: "ignore", windowsHide: true, timeout: 5000 });
+          opened = true;
+        } catch { /* powershell failed, try next */ }
+      }
+      if (!opened) {
+        try {
+          execSync(`rundll32 url.dll,FileProtocolHandler "${url}"`, { stdio: "ignore", windowsHide: true });
+        } catch { /* all methods failed — fallback URL will show */ }
+      }
+    } else {
+      execSync(`xdg-open "${url}"`, { stdio: "ignore" });
+    }
   } catch {
     // Swallow — we'll show the URL to the user as fallback
+  }
+}
+
+/** Copy text to system clipboard. Best-effort, never throws. */
+function copyToClipboard(text: string): boolean {
+  try {
+    const p = process.platform;
+    if (p === "darwin") {
+      execSync("pbcopy", { input: text, stdio: ["pipe", "ignore", "ignore"] });
+    } else if (p === "win32") {
+      execSync("clip", { input: text, stdio: ["pipe", "ignore", "ignore"] });
+    } else {
+      execSync("xclip -selection clipboard", { input: text, stdio: ["pipe", "ignore", "ignore"] });
+    }
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -185,9 +226,15 @@ export async function startOAuthBrowserAuth(
 
     server.on("error", () => settle(null));
 
-    server.listen(0, "127.0.0.1", () => {
+    // Bind to 127.0.0.1 on non-Windows; on Windows also accept localhost
+    // connections since some browsers/firewalls route differently.
+    const bindHost = process.platform === "win32" ? "0.0.0.0" : "127.0.0.1";
+
+    server.listen(0, bindHost, () => {
       const port = (server.address() as AddressInfo).port;
-      const redirectUri = `http://127.0.0.1:${port}/callback`;
+      // Use localhost on Windows (avoids IPv4/IPv6 mismatch issues in browsers)
+      const loopback = process.platform === "win32" ? "localhost" : "127.0.0.1";
+      const redirectUri = `http://${loopback}:${port}/callback`;
 
       const loginUrl =
         `${webUrl.replace(/\/$/, "")}/klaatu/cli-auth` +
@@ -200,7 +247,15 @@ export async function startOAuthBrowserAuth(
 
       onStatus("Opening browser…");
       openBrowser(loginUrl);
-      setTimeout(() => onStatus(`Waiting for browser login…  ${loginUrl}`), 1500);
+
+      // After 2s, show fallback URL and copy to clipboard for easy pasting
+      setTimeout(() => {
+        const copied = copyToClipboard(loginUrl);
+        const hint = copied
+          ? "URL copied to clipboard — paste in browser"
+          : "Copy this URL and open in browser:";
+        onStatus(`Waiting for browser login…\n${hint}\n${loginUrl}`);
+      }, 2000);
     });
 
     const timer = setTimeout(() => {

@@ -175,7 +175,7 @@ The router escalates automatically when a task turns out harder than it looked a
 
 ### Post-Edit Diagnostics — the Model Sees Its Own Mistakes
 
-After a successful edit, Klaat Code runs your project's typechecker/linter on the changed file (auto-detects eslint/biome, ruff, gofmt, or a configured command) and hands any errors straight back to the model in the same turn — it fixes them before returning control to you, instead of costing you a round-trip.
+After a successful edit, Klaat Code runs your project's typechecker/linter on the changed file (auto-detects eslint/biome, ruff, gofmt, rubocop, swiftlint, phpstan/pint, ktlint, shellcheck, or a configured command) and hands any errors straight back to the model in the same turn — it fixes them before returning control to you, instead of costing you a round-trip.
 
 ### Terminal UI with Real Syntax Highlighting
 
@@ -258,7 +258,8 @@ Every conversation is saved as a transcript in `~/.klaatai/sessions/`.
 ```
 /sessions       # list saved sessions
 /resume <id>    # pick up exactly where you left off
-/share          # export session to markdown
+/export         # export session to Markdown (optional path)
+/share          # alias for /export
 ```
 
 ### Permissions
@@ -354,7 +355,7 @@ This README covers the highlights. For every shell flag, slash command, config k
 | `/test [args]` | Run tests (auto-detects Bun/Vitest/Jest/pytest/Go/Cargo) |
 | `/skill <name>` · `/hooks` | Skills and hooks |
 | `/init` | Generate project rules from your stack |
-| `/sessions` · `/resume <id>` · `/share` | Session management |
+| `/sessions` · `/resume <id>` · `/export [path]` · `/share` | Session management |
 | `/mcp` | Manage MCP servers |
 | `/agents` | List agent personas + running background sub-agents |
 | `/perms` | Review tool permissions |

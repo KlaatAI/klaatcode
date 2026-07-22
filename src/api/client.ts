@@ -202,7 +202,7 @@ export class KlaatAIClient {
 
   constructor(opts: ClientOptions) {
     this.apiKey = opts.apiKey;
-    this.baseUrl = (opts.baseUrl ?? "http://127.0.0.1:8765").replace(/\/$/, "");
+    this.baseUrl = (opts.baseUrl ?? "https://api.klaatai.com").replace(/\/$/, "");
     this.model = opts.model ?? "klaatu";
     this._sessionId = crypto.randomUUID();
     this._onAuthExpired = opts.onAuthExpired ?? null;

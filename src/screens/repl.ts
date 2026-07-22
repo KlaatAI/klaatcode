@@ -58,6 +58,7 @@ import { dialectForTier, toolsForDialect, dialectIncludesExtras, type ToolDialec
 import { PluginRegistry } from "../tools/plugins.js";
 import { configureDiagnostics } from "../tools/diagnostics.js";
 import { setOutputFilterEnabled } from "../tools/output-filter.js";
+import { expandSkill, formatSkillLocation, loadSkills } from "../skills/loader.js";
 import { PhaseTracker } from "../agent/phase-budget.js";
 import { collectCriticalState, checkSummaryCoverage } from "../agent/collapse-check.js";
 import { killAllBackground } from "../tools/background.js";
@@ -73,6 +74,10 @@ import { COMPACTION_PROMPT, extractSummary, MAX_CONSECUTIVE_COMPACT_FAILURES } f
 import { compactMessagesForApi } from "../agent/compaction.js";
 import { stripStrayTextToolCallArtifacts } from "../agent/text-tool-artifacts.js";
 import { drawWelcomeCard } from "./welcome-card.js";
+import {
+  renderSessionMarkdown,
+  resolveExportPath,
+} from "./export-session.js";
 import {
   TIER_COSTS, VALID_TIERS, TIER_CONTEXT_WINDOW, SAFE_CONTEXT_BUDGET,
   TIER_COLOR_MAP, KLAATU_MODEL_MAP, formatTok, formatElapsed,
@@ -694,7 +699,8 @@ export async function runREPL(
     { cmd: "/review",     desc: "AI code review of current git diff" },
     { cmd: "/rollback",   desc: "Restore files from a checkpoint" },
     { cmd: "/sessions",   desc: "List saved sessions" },
-    { cmd: "/share",      desc: "Export session to markdown" },
+    { cmd: "/export",     desc: "Export session to Markdown [path]" },
+    { cmd: "/share",      desc: "Alias for /export" },
     { cmd: "/skill",      desc: "Invoke a saved prompt skill" },
     { cmd: "/test",       desc: "Run the project test suite" },
     { cmd: "/theme",      desc: "Show or change the UI theme" },
@@ -1245,67 +1251,11 @@ export async function runREPL(
     });
   }
 
-  // ─── Skills ───────────────────────────────────────────────────────────────
-  // v2: optional YAML frontmatter between --- fences:
-  //   ---
-  //   name: fix-types        (overrides filename)
-  //   description: Fix all TS type errors
-  //   args: [file or dir]    (usage hint shown in the list)
-  //   ---
-  // Body may reference $ARGUMENTS — replaced with whatever follows the skill
-  // name at invocation (`/skill fix-types src/` or `/fix-types src/`).
-
-  interface Skill {
-    name: string; path: string; content: string; scope: "project" | "global";
-    description?: string; argsHint?: string;
-  }
-
-  function parseSkillFile(raw: string): { meta: Record<string, string>; body: string } {
-    const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(raw);
-    if (!m) return { meta: {}, body: raw.trim() };
-    const meta: Record<string, string> = {};
-    for (const line of m[1]!.split("\n")) {
-      const kv = /^([\w-]+):\s*(.*)$/.exec(line.trim());
-      if (kv) meta[kv[1]!.toLowerCase()] = kv[2]!.trim().replace(/^["'\[]|["'\]]$/g, "");
-    }
-    return { meta, body: raw.slice(m[0].length).trim() };
-  }
-
-  function loadSkills(): Skill[] {
-    const skills: Skill[] = [];
-    const dirs: Array<{ dir: string; scope: "project" | "global" }> = [
-      { dir: join(homedir(), ".klaatai", "skills"), scope: "global" },
-      { dir: join(projectRoot, ".klaatai", "skills"),  scope: "project" },
-    ];
-    for (const { dir, scope } of dirs) {
-      if (!existsSync(dir)) continue;
-      try {
-        for (const f of readdirSync(dir)) {
-          if (!f.endsWith(".md")) continue;
-          const p = join(dir, f);
-          try {
-            const { meta, body } = parseSkillFile(readFileSync(p, "utf-8"));
-            skills.push({
-              name: meta["name"] || f.replace(/\.md$/, ""),
-              path: p,
-              content: body,
-              scope,
-              description: meta["description"],
-              argsHint: meta["args"],
-            });
-          } catch { /* skip unreadable */ }
-        }
-      } catch { /* skip unreadable dir */ }
-    }
-    return skills;
-  }
-
-  /** Expand a skill body with invocation arguments ($ARGUMENTS placeholder). */
-  function expandSkill(skill: Skill, args: string): string {
-    if (skill.content.includes("$ARGUMENTS")) {
-      return skill.content.replaceAll("$ARGUMENTS", args || "(none)");
-    }
-    return args ? `${skill.content}\n\nArguments: ${args}` : skill.content;
+  function skillLoadOptions() {
+    return {
+      projectRoot,
+      importClaudeSkills: config.compat?.importClaudeSkills !== false,
+    };
   }
 
   // ─── Hooks ────────────────────────────────────────────────────────────────
@@ -2050,7 +2000,8 @@ export async function runREPL(
           "  /undo             — revert files written by the last AI response (via git)",
           "  /checkpoint [lbl] — snapshot modified files (max 10 kept)",
           "  /rollback [id]    — restore files from a checkpoint",
-          "  /share            — export current session to a markdown file",
+          "  /export [path]    — export current session to Markdown (default: ./klaatai-session-<id>.md)",
+          "  /share [path]     — alias for /export",
           "  /plugin list      — list installed plugins in ~/.klaatai/plugins/",
           "  /doctor           — diagnostics: auth, API, MCP, tools, config",
           "  /theme [name]     — show or change the UI theme",
@@ -2161,26 +2112,17 @@ export async function runREPL(
           return true;
         }
 
-        if (slash === "/share") {
-          const outPath = join(homedir(), `klaatai-session-${sessionId}.md`);
-          const mdLines: string[] = [
-            `# KlaatAI Session — ${sessionId}`,
-            `*Exported: ${new Date().toISOString().slice(0, 19)}*`,
-            "",
-          ];
-          for (const m of messages) {
-            if (m.role === "system") continue;
-            if (m.role === "user") {
-              mdLines.push(`## You\n\n${m.content}\n`);
-            } else if (m.role === "assistant" && m.kind !== "error") {
-              mdLines.push(`## Assistant\n\n${m.content}\n`);
-            } else if (m.role === "tool") {
-              mdLines.push(`### Tool: ${m.toolName ?? "unknown"}\n\n\`\`\`\n${m.content}\n\`\`\`\n`);
-            }
-          }
-          mdLines.push(`---\n*Session cost: $${sessionCost.toFixed(4)} | Requests: ${totalRequests}*`);
+        if (slash === "/export" || slash === "/share") {
+          const pathArg = parts.slice(1).join(" ").trim() || undefined;
+          const outPath = resolveExportPath(sessionId, pathArg);
+          const md = renderSessionMarkdown({
+            sessionId,
+            messages,
+            sessionCost,
+            totalRequests,
+          });
           try {
-            writeFileSync(outPath, mdLines.join("\n"), "utf-8");
+            writeFileSync(outPath, md, "utf-8");
             pushSystemMsg(`Session exported to **${outPath}**`);
           } catch (e) {
             pushSystemMsg(`Export failed: ${e instanceof Error ? e.message : String(e)}`, "error");
@@ -2914,14 +2856,15 @@ export async function runREPL(
         // ── /skill — prompt template skills ───────────────────────────────
         if (slash === "/skill" || slash === "/skills") {
           const arg = parts.slice(1).join(" ").trim();
-          const allSkills = loadSkills();
+          const allSkills = loadSkills(skillLoadOptions());
 
           // /skill list or bare /skill
           if (!arg || arg === "list") {
             if (allSkills.length === 0) {
               pushSystemMsg(
                 "No skills found.\n\n" +
-                "Create a skill: save a `.md` file in `.klaatai/skills/` (project) or `~/.klaatai/skills/` (global).\n\n" +
+                "Create a skill: save a `.md` file in `.klaatai/skills/` (project) or `~/.klaatai/skills/` (global).\n" +
+                "Claude Code skills in `.claude/skills/<name>/SKILL.md` are also discovered when compat is enabled.\n\n" +
                 "Example: `echo '# Fix Types\\nFix all TypeScript type errors in the project.' > .klaatai/skills/fix-types.md`",
               );
             } else {
@@ -2929,7 +2872,7 @@ export async function runREPL(
               for (const s of allSkills) {
                 const desc = s.description ?? s.content.split("\n")[0]!.replace(/^#+\s*/, "").slice(0, 60);
                 const hint = s.argsHint ? ` \`${s.argsHint}\`` : "";
-                lines.push(`  **${s.name}**${hint} *(${s.scope})* — ${desc}`);
+                lines.push(`  **${s.name}**${hint} *(${formatSkillLocation(s)})* — ${desc}`);
               }
               lines.push("\nUsage: `/skill <name> [args]` or directly `/<name> [args]` · `/skill new <name>` to create");
               pushSystemMsg(lines.join("\n"));
@@ -3009,7 +2952,7 @@ export async function runREPL(
         {
           const name = slash.slice(1);
           const rest = parts.slice(1).join(" ").trim();
-          const skill = loadSkills().find(s => s.name === name);
+          const skill = loadSkills(skillLoadOptions()).find(s => s.name === name);
           if (skill) {
             pushSystemMsg(`Invoking skill **${skill.name}**${rest ? ` with \`${rest}\`` : ""}…`);
             void sendMessage(expandSkill(skill, rest));
@@ -4716,7 +4659,7 @@ export async function runREPL(
       { label: "Sessions",        value: "sessions",   description: "List saved sessions",                  color: "cyan" },
       { label: "Compact Context", value: "compact",    description: "Summarise to free context window",     color: "yellow" },
       { label: "Checkpoint",      value: "checkpoint", description: "Snapshot modified files for rollback", color: "#fb923c" },
-      { label: "Share / Export",  value: "share",      description: "Export session to markdown file",      color: "#f9a8d4" },
+      { label: "Export",          value: "export",     description: "Export session to Markdown file",     color: "#f9a8d4" },
       { label: "Git Diff",        value: "diff",       description: "Show git diff for all changes",        color: "#60a5fa" },
       { label: "Insert @ File",   value: "at",         description: "Pick a file to inject into message",  color: "#34d399" },
       { label: "Open in Editor",  value: "editor",     description: "Compose in $EDITOR (ctrl+x ctrl+e)",  color: "white" },
@@ -4779,8 +4722,8 @@ export async function runREPL(
         }
       } else if (item.value === "checkpoint") {
         handleSlashCommand("/checkpoint");
-      } else if (item.value === "share") {
-        handleSlashCommand("/share");
+      } else if (item.value === "export") {
+        handleSlashCommand("/export");
       } else if (item.value === "diff") {
         handleSlashCommand("/diff");
       } else if (item.value === "at") {

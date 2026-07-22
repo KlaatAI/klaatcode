@@ -3,6 +3,54 @@
 All notable changes to Klaat Code are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## [2.2.9] — 2026-07-21
+
+### Fixed
+
+- **Windows browser auto-open** — Now tries 3 methods in sequence: `explorer.exe` (most reliable, no shell interpretation), `powershell.exe Start-Process`, and `rundll32 url.dll` as final fallback. Covers machines where PowerShell is blocked or not in PATH.
+- **URL not copyable in TUI** — When browser fails to open, the auth URL is now **auto-copied to clipboard** (`clip` on Windows, `pbcopy` on macOS, `xclip` on Linux). User sees "URL copied to clipboard — paste in browser" instead of trying to select text from the TUI alt-screen.
+
+## [2.2.8] — 2026-07-21
+
+### Fixed
+
+- **Version display** — Splash screen now shows "KlaatCode v2.2.8" instead of hardcoded "CLI v0.1.0".
+- **Fallback URL overflow** — When browser fails to auto-open, the auth URL no longer bleeds into other UI components. Long URLs are now wrapped to fit the terminal width.
+- **Fallback URL visibility** — Auth URL displayed in blue underlined text, auto-detected as clickable by modern terminals (Windows Terminal, iTerm2, VS Code terminal).
+
+## [2.2.7] — 2026-07-21
+
+### Fixed
+
+- **Windows login STILL broken — `cmd.exe` truncates URL at `&` even via `spawn`.** The v2.2.5 fix used `spawn("cmd.exe", ["/c", "start", "", url])` but cmd.exe processes `&` as a command separator regardless of how it's invoked. Switched to `powershell.exe Start-Process` which correctly handles URLs containing `&`, `=`, and other special characters without interpretation. Windows users will now see the full auth page with all parameters intact.
+
+## [2.2.6] — 2026-07-21
+
+### Fixed
+
+- **Windows (and all new installs) pointed at localhost instead of production API.** The default `baseUrl` in `DEFAULT_CONFIG` was `http://127.0.0.1:8765` (the local dev server). Fresh installs with no `~/.klaatai/config.json` would open the browser to `http://localhost:4410/klaatu/cli-auth` — which doesn't exist on user machines. Default is now `https://api.klaatai.com`, so login correctly opens `https://klaatai.com/klaatu/cli-auth`. Existing installs with a config file are unaffected.
+
+### Added
+
+- **Claude Code skills compatibility** — `.claude/skills` directory is now auto-discovered alongside `.klaatai/skills`. Thanks [@syf2211](https://github.com/syf2211)! ([#43](https://github.com/KlaatAI/klaatcode/pull/43))
+- **`/export` slash command** — export the current session to a Markdown file. Thanks [@Ayush7614](https://github.com/Ayush7614)! ([#45](https://github.com/KlaatAI/klaatcode/pull/45))
+- **Swift, PHP, Kotlin, Shell post-edit diagnostics** — the feedback loop now runs `swiftc`, `php -l`, `kotlinc`, and `shellcheck` when available. Thanks [@Ayush7614](https://github.com/Ayush7614)! ([#44](https://github.com/KlaatAI/klaatcode/pull/44))
+
+## [2.2.5] — 2026-07-21
+
+### Fixed
+
+- **Windows login broken — browser auth now works on Windows.** Three issues combined to break the OAuth redirect on Windows: (1) `cmd.exe`'s `start` command misinterpreted `&` in the login URL as a command separator, truncating query params — fixed by using `spawn` with an explicit arg array that bypasses shell interpretation; (2) the local callback server bound only to `127.0.0.1` which some Windows firewall configs block — now binds to `0.0.0.0` on Windows; (3) the redirect URI used `127.0.0.1` which some browsers resolve to IPv6 `[::1]` — now uses `localhost` on Windows for correct resolution. ([#47](https://github.com/KlaatAI/klaatcode/issues/47))
+
+### Added
+
+- **Shell completions (bash / zsh / fish).** `klaatcode completions bash|zsh|fish` prints a static completion script — works in the compiled binary without reading from disk. Covers both `klaatcode` and `klaatai` binary names. Thanks [@Ayush7614](https://github.com/Ayush7614)! ([#46](https://github.com/KlaatAI/klaatcode/pull/46))
+
+### Changed
+
+- **`pull-from-public.sh`** now recommends `patch -p1` instead of `git apply` (which silently skips patches in monorepo layouts).
+- **Fallback URL display** — if the browser doesn't open on any platform, the full login URL is printed to the terminal after 2 seconds so users can copy-paste manually.
+
 ## [2.2.4] — 2026-07-20
 
 Six features no other CLI coding agent ships built-in — token efficiency and runaway-protection, all on by default, all with an `off` switch. Plus the first two community contributions.

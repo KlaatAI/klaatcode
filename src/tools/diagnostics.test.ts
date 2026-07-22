@@ -2,7 +2,11 @@
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runDiagnostics, configureDiagnostics } from "./diagnostics";
+import {
+  runDiagnostics,
+  configureDiagnostics,
+  resolveDiagnosticsCommand,
+} from "./diagnostics";
 
 let tmp: string;
 
@@ -49,5 +53,158 @@ describe("Ruby diagnostics (.rb)", () => {
     // No override for .rb, rubocop not on PATH -> null
     const result = runDiagnostics(absPath, tmp);
     expect(result === null || typeof result === "string").toBe(true);
+  });
+});
+
+/** Shared shape for PATH-gated language branches: never throw; null or string. */
+function expectSoftResult(absPath: string): void {
+  expect(() => runDiagnostics(absPath, tmp)).not.toThrow();
+  const result = runDiagnostics(absPath, tmp);
+  expect(result === null || typeof result === "string").toBe(true);
+}
+
+describe("Swift diagnostics (.swift)", () => {
+  test("never throws; skips when swiftlint absent", () => {
+    const absPath = join(tmp, "Foo.swift");
+    writeFileSync(absPath, "struct Foo {}\n");
+    expectSoftResult(absPath);
+  });
+
+  test("returns null when diagnostics disabled", () => {
+    configureDiagnostics({ enabled: false });
+    const absPath = join(tmp, "Bar.swift");
+    writeFileSync(absPath, "struct Bar {}\n");
+    expect(runDiagnostics(absPath, tmp)).toBeNull();
+  });
+});
+
+describe("PHP diagnostics (.php)", () => {
+  test("never throws; skips when phpstan/pint absent", () => {
+    const absPath = join(tmp, "foo.php");
+    writeFileSync(absPath, "<?php echo 1;\n");
+    expectSoftResult(absPath);
+  });
+
+  test("returns null when diagnostics disabled", () => {
+    configureDiagnostics({ enabled: false });
+    const absPath = join(tmp, "bar.php");
+    writeFileSync(absPath, "<?php echo 1;\n");
+    expect(runDiagnostics(absPath, tmp)).toBeNull();
+  });
+});
+
+describe("Kotlin diagnostics (.kt / .kts)", () => {
+  test("never throws for .kt when ktlint absent", () => {
+    const absPath = join(tmp, "Foo.kt");
+    writeFileSync(absPath, "fun main() {}\n");
+    expectSoftResult(absPath);
+  });
+
+  test("never throws for .kts when ktlint absent", () => {
+    const absPath = join(tmp, "build.kts");
+    writeFileSync(absPath, "plugins {}\n");
+    expectSoftResult(absPath);
+  });
+
+  test("returns null when diagnostics disabled", () => {
+    configureDiagnostics({ enabled: false });
+    const absPath = join(tmp, "Bar.kt");
+    writeFileSync(absPath, "class Bar\n");
+    expect(runDiagnostics(absPath, tmp)).toBeNull();
+  });
+});
+
+describe("Shell diagnostics (.sh / .bash)", () => {
+  test("never throws for .sh when shellcheck absent", () => {
+    const absPath = join(tmp, "script.sh");
+    writeFileSync(absPath, "#!/bin/sh\necho hi\n");
+    expectSoftResult(absPath);
+  });
+
+  test("never throws for .bash when shellcheck absent", () => {
+    const absPath = join(tmp, "script.bash");
+    writeFileSync(absPath, "#!/bin/bash\necho hi\n");
+    expectSoftResult(absPath);
+  });
+
+  test("does not run shellcheck on .zsh (unsupported)", () => {
+    const absPath = join(tmp, "script.zsh");
+    writeFileSync(absPath, "#!/bin/zsh\necho hi\n");
+    const cmd = resolveDiagnosticsCommand(absPath, tmp, { onPath: () => true });
+    expect(cmd).toBeNull();
+  });
+
+  test("returns null when diagnostics disabled", () => {
+    configureDiagnostics({ enabled: false });
+    const absPath = join(tmp, "x.sh");
+    writeFileSync(absPath, "#!/bin/sh\ntrue\n");
+    expect(runDiagnostics(absPath, tmp)).toBeNull();
+  });
+});
+
+describe("resolveDiagnosticsCommand — positive PATH stubs", () => {
+  const present = (name: string) => (cmd: string) => cmd === name;
+
+  test("swiftlint argv", () => {
+    const abs = join(tmp, "A.swift");
+    const cmd = resolveDiagnosticsCommand(abs, tmp, { onPath: present("swiftlint") });
+    expect(cmd).toEqual(["swiftlint", "lint", "--quiet", "--reporter", "xcode", abs]);
+  });
+
+  test("phpstan preferred over pint", () => {
+    const abs = join(tmp, "a.php");
+    const cmd = resolveDiagnosticsCommand(abs, tmp, {
+      onPath: (c) => c === "phpstan" || c === "pint",
+    });
+    expect(cmd![0]).toBe("phpstan");
+    expect(cmd).toContain(abs);
+  });
+
+  test("pint used when phpstan absent; php alone is not enough", () => {
+    const abs = join(tmp, "a.php");
+    expect(resolveDiagnosticsCommand(abs, tmp, { onPath: present("pint") })![0]).toBe("pint");
+    expect(resolveDiagnosticsCommand(abs, tmp, { onPath: present("php") })).toBeNull();
+  });
+
+  test("ktlint argv has no --reporter flag", () => {
+    const abs = join(tmp, "A.kt");
+    expect(resolveDiagnosticsCommand(abs, tmp, { onPath: present("ktlint") }))
+      .toEqual(["ktlint", abs]);
+  });
+
+  test("shellcheck argv for .sh and .bash", () => {
+    const sh = join(tmp, "a.sh");
+    const bash = join(tmp, "a.bash");
+    expect(resolveDiagnosticsCommand(sh, tmp, { onPath: present("shellcheck") }))
+      .toEqual(["shellcheck", "-f", "gcc", sh]);
+    expect(resolveDiagnosticsCommand(bash, tmp, { onPath: present("shellcheck") }))
+      .toEqual(["shellcheck", "-f", "gcc", bash]);
+  });
+});
+
+describe("config override still wins for new extensions", () => {
+  test("explicit commands override PATH detection for .sh", () => {
+    configureDiagnostics({
+      enabled: true,
+      timeoutMs: 8_000,
+      commands: { ".sh": "echo 'script.sh:1:1: error: fake' >&2; exit 1" },
+    });
+    const absPath = join(tmp, "override.sh");
+    writeFileSync(absPath, "#!/bin/sh\n");
+    const result = runDiagnostics(absPath, tmp);
+    expect(result).not.toBeNull();
+    expect(result!).toContain("Diagnostics after this edit");
+    expect(result!).toContain("fake");
+  });
+
+  test("explicit clean override returns null for .swift", () => {
+    configureDiagnostics({
+      enabled: true,
+      timeoutMs: 8_000,
+      commands: { ".swift": "true" },
+    });
+    const absPath = join(tmp, "clean.swift");
+    writeFileSync(absPath, "struct Ok {}\n");
+    expect(runDiagnostics(absPath, tmp)).toBeNull();
   });
 });
