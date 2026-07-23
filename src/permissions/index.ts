@@ -243,7 +243,7 @@ export function summarizeTool(tc: ToolCall): string {
         const path = String(args["path"] ?? "?");
         const off  = args["offset"] ? Number(args["offset"]) : null;
         const lim  = args["limit"]  ? Number(args["limit"])  : null;
-        return `read   ${path}${off ? ` :${off}${lim ? `–${off + lim - 1}` : "+"}` : ""}`;
+        return `read   ${path}${off ? `:${off}${lim ? `–${off + lim - 1}` : "+"}` : ""}`;
       }
       case "list_dir":
         return `ls     ${String(args["path"] ?? ".")}`;

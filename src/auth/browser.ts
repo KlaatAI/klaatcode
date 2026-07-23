@@ -29,23 +29,18 @@ export function openBrowser(url: string): void {
     if (p === "darwin") {
       execSync(`open "${url}"`, { stdio: "ignore" });
     } else if (p === "win32") {
-      // Try multiple methods — some Windows configs block certain approaches.
-      // 1. explorer.exe handles URLs natively without shell interpretation issues
-      // 2. PowerShell Start-Process as backup
-      // 3. rundll32 as final fallback
-      let opened = false;
+      // IMPORTANT: do NOT use `explorer "${url}"` here. explorer.exe returns a
+      // non-zero exit code even when it successfully opens the URL, so chaining
+      // it with a fallback (treating the throw as failure) opens the browser
+      // TWICE. PowerShell Start-Process reports its exit code honestly and
+      // handles URLs with `&` query params (which cmd's `start` mangles), so we
+      // use it as the primary and fall back to rundll32 only if it truly fails.
       try {
-        execSync(`explorer "${url}"`, { stdio: "ignore", windowsHide: true });
-        opened = true;
-      } catch { /* explorer failed, try next */ }
-      if (!opened) {
-        try {
-          execSync(`powershell.exe -NoProfile -Command "Start-Process '${url.replace(/'/g, "''")}'"`
-            , { stdio: "ignore", windowsHide: true, timeout: 5000 });
-          opened = true;
-        } catch { /* powershell failed, try next */ }
-      }
-      if (!opened) {
+        execSync(
+          `powershell.exe -NoProfile -Command "Start-Process '${url.replace(/'/g, "''")}'"`,
+          { stdio: "ignore", windowsHide: true, timeout: 5000 },
+        );
+      } catch {
         try {
           execSync(`rundll32 url.dll,FileProtocolHandler "${url}"`, { stdio: "ignore", windowsHide: true });
         } catch { /* all methods failed — fallback URL will show */ }

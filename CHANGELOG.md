@@ -3,6 +3,30 @@
 All notable changes to Klaat Code are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## [2.3.0] — 2026-07-23
+
+### Added
+
+- **Prompt-cache savings in the sidebar** — the Context panel now shows `Cached N (X% of input)` when the server's prompt cache is hitting, so you can see the cost saving in real time.
+- **Honest context meter** — the Context panel shows the active model's real window (not a misleading sum of all tiers), a `Compact at %` indicator, and cumulative `Processed` tokens since the last compaction.
+
+### Changed
+
+- **Cleaner tool-call display** — reads, edits, and commands now render as a single tidy line (Claude-style), colour-coded by status (green ok / red fail), and expand on demand. No more three-line content dumps cluttering the transcript.
+- **Window-aware compaction** — context compaction now triggers at ~78% of the *active* model's window instead of a fixed 60K threshold, so it works correctly on every tier — including small ones where it previously never fired.
+- **Tier context windows aligned with the server** — removes a double-trim that could shrink your working context more than intended.
+
+### Fixed
+
+- **Context no longer pins at 100% / stalls** — compaction reliably frees space as context fills, on every tier (the old threshold was larger than the small-tier window, so it never ran).
+- **"Continue" no longer loops** — after an exploration-budget pause, continuing no longer re-reads the same files and hits the identical wall; the agent gets more room plus a directive to act on what it already has.
+- **No false "agent may be stuck" pauses on analysis** — deep read/analysis tasks (e.g. comparing large datasets) are no longer stopped mid-way. The pause now fires only on a genuine repetition loop, and producing a real answer counts as progress.
+- **MCP file writes now tracked** — files written via MCP filesystem tools appear in **Modified Files** and support `/undo` (previously showed "Modified Files 0" despite successful writes).
+
+### Notes
+
+- Several routing improvements ship **server-side** and roll out automatically (no CLI update needed): heavy / multi-file conversations auto-escalate to a larger-window model so builds don't stall; mechanical build steps (writing files, running commands) use the faster code tier instead of the slower reasoning tier; large prompts prefer cache-capable models to cut cost.
+
 ## [2.2.9] — 2026-07-21
 
 ### Fixed

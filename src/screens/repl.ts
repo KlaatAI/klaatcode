@@ -79,7 +79,8 @@ import {
   resolveExportPath,
 } from "./export-session.js";
 import {
-  TIER_COSTS, VALID_TIERS, TIER_CONTEXT_WINDOW, SAFE_CONTEXT_BUDGET,
+  TIER_COSTS, VALID_TIERS, TIER_CONTEXT_WINDOW,
+  COMPACT_TRIGGER_RATIO,
   TIER_COLOR_MAP, KLAATU_MODEL_MAP, formatTok, formatElapsed,
 } from "./tiers.js";
 import { getPersona, PERSONAS } from "../agent/personas.js";
@@ -274,6 +275,10 @@ export async function runREPL(
   let permRequest:  PermRequest | null  = null;
   let permSelected = 0; // arrow-key focused button index (0=Yes 1=No 2=Session 3=Always)
 
+  // ─── Budget pause prompt (Continue / Stop) ────────────────────────────────
+  let budgetPausePrompt: { resolve: (cont: boolean) => void } | null = null;
+  let budgetPauseSelected = 0; // 0=Continue, 1=Stop
+
   // ─── ask_user picker (model asks the user a multiple-choice question) ─────
   interface AskRequest {
     question: string;
@@ -298,6 +303,13 @@ export async function runREPL(
 
   let totalTokens:  { prompt: number; completion: number } = { prompt: 0, completion: 0 };
   let lastContextSize: number = 0; // actual context size from last API call (prompt_tokens)
+  // Cumulative prompt-cache-hit input tokens this session (prefix cache). Billed
+  // at ~10-40% of normal input — shown so the user sees the cache saving.
+  let sessionCachedTokens = 0;
+  // Cumulative tokens processed since the last compaction (shown in sidebar,
+  // reset to 0 when compactContext succeeds). Lets the user see total context
+  // churn between the automatic compaction checkpoints.
+  let ctxProcessedSinceCompact = 0;
 
   // ─── 9.4 budget guards ─────────────────────────────────────────────────────
   const sessionStart = Date.now();
@@ -318,23 +330,28 @@ export async function runREPL(
   const phaseTracker = new PhaseTracker({ enabled: config.phaseBudgets !== "off" });
 
   /** Attribute usage + budget check; called from the metadata handler. */
-  function checkPhaseBudget(totalTokensThisTurn: number): void {
-    const ev = phaseTracker.addUsage(totalTokensThisTurn);
+  function checkPhaseBudget(
+    totalTokensThisTurn: number,
+    completionTokens = 0,
+    loopSuspected = false,
+  ): void {
+    const ev = phaseTracker.addUsage(totalTokensThisTurn, completionTokens, { loopSuspected });
     if (!ev) return;
     if (ev.kind === "pause") {
       messages.push({
         role: "system", kind: "error",
         content:
-          `⛔ Exploration used ${formatTok(ev.used)} tokens without producing an edit ` +
-          `or answer (budget ${formatTok(ev.budget)}). Paused — the agent may be stuck. ` +
-          `Narrow the task, point it at specific files, or send "continue" to allow more exploration.`,
+          `⛔ Exploration used ${formatTok(ev.used)} tokens (cumulative this task) without ` +
+          `producing an edit or answer, and the agent appears to be repeating itself ` +
+          `(budget ${formatTok(ev.budget)}). Narrow the task, or choose Continue/Stop below.`,
       });
     } else {
       messages.push({
         role: "system",
         content:
           `⚠ The ${ev.phase} phase passed its soft token budget ` +
-          `(${formatTok(ev.used)} / ${formatTok(ev.budget)}). See /cost for the phase breakdown.`,
+          `(${formatTok(ev.used)} / ${formatTok(ev.budget)} cumulative this task). ` +
+          `Still making progress — not paused. See /cost for the phase breakdown.`,
       });
     }
     chatLinesDirty = true;
@@ -516,6 +533,13 @@ export async function runREPL(
   function getContextWindow(): number {
     const tier = forceTier ?? lastTier;
     return TIER_CONTEXT_WINDOW[tier] ?? DEFAULT_CONTEXT_WINDOW;
+  }
+
+  /** Token count at which real (LLM) compaction should fire for the active
+   * tier. Window-relative so it works on small tiers (fast 28K → ~22K) where
+   * the old fixed 60K threshold could never trigger. */
+  function compactThreshold(): number {
+    return Math.round(getContextWindow() * COMPACT_TRIGGER_RATIO);
   }
 
   const sessionApproved = new Set<string>();
@@ -712,7 +736,7 @@ export async function runREPL(
 
   /** Recompute the suggestion strip from the current input value. */
   function updateSlashSuggest(): void {
-    if (replState !== "idle" || permRequest || dialog.active || themePicker || askRequest) {
+    if (replState !== "idle" || permRequest || budgetPausePrompt || dialog.active || themePicker || askRequest) {
       slashSuggest = null;
       return;
     }
@@ -902,8 +926,17 @@ export async function runREPL(
   setOutputFilterEnabled(config.outputFilter !== "off");
 
   // 9.3: attention-ordered old-context arrangement, config-gated.
-  const compactOpts = (): { attentionOrder: boolean } =>
-    ({ attentionOrder: config.attentionOrder !== "off" });
+  // Reordering the old zone rewrites bytes after the system seed, which breaks
+  // the provider's automatic prefix cache (prefix_cache_automatic) — a large
+  // cost saving on big-window tiers where the grown context is exactly what we
+  // want cached. So on the heavy lane (window ≥ 100K) keep chronological order
+  // (cache-friendly, stable prefix); on tight small tiers keep attention-order
+  // (context is scarce, "lost-in-middle" hurts more, cache matters less).
+  const HEAVY_LANE_WINDOW = 100_000;
+  const compactOpts = (): { attentionOrder: boolean } => {
+    if (config.attentionOrder === "off") return { attentionOrder: false };
+    return { attentionOrder: getContextWindow() < HEAVY_LANE_WINDOW };
+  };
 
   const modifiedFiles: FileChange[] = [];
 
@@ -1071,26 +1104,32 @@ export async function runREPL(
         const contentLines = msg.content.split("\n").length;
         const isLong = contentLines > 6;
 
-        // Header: collapse arrow · status icon · verb+target summary · size hint.
-        // The summary already carries the verb (read/edit/$/grep …), so the raw
-        // tool name only appears when no richer summary exists.
+        // Header (Claude-style minimal): one line — status dot · Verb · target · size.
+        // Collapsed long tools show NO content peek (just this line); expanding
+        // reveals the body. The summary carries "verb  target" (verb lowercase,
+        // space-padded for permission-prompt alignment); split + capitalize here.
         const failed = msg.content.startsWith("Error");
-        const label = msg.toolSummary && msg.toolSummary !== msg.toolName
+        const rawLabel = msg.toolSummary && msg.toolSummary !== msg.toolName
           ? msg.toolSummary
           : (msg.toolName ?? "Tool");
+        const _lm = rawLabel.match(/^(\S+)\s+([\s\S]*)$/);
+        let verb = _lm ? _lm[1] : rawLabel;
+        const target = _lm ? _lm[2].replace(/\s+/g, " ").trim() : "";
+        if (verb !== "$" && /^[a-z]/.test(verb)) verb = verb[0].toUpperCase() + verb.slice(1);
+        const statusColor = failed ? 204 : 114;
+        // Filled dot for a tool call; caret when expanded. Colour = status.
+        const marker = isLong && !isCollapsed ? "▾ " : "⏺ ";
         const toolHeader: StyledLine = [
-          span(isLong ? (isCollapsed ? "▸ " : "▾ ") : "· ", { fg: 222, bold: true }),
-          span(failed ? "✖ " : "✓ ", { fg: failed ? 204 : 114, bold: true }),
-          span(label, { fg: palette.chatFg as number | "white", bold: true }),
+          span(marker, { fg: statusColor, bold: true }),
+          span(verb, { fg: palette.chatFg as number | "white", bold: true }),
         ];
-
-        if (isLong && isCollapsed) {
+        if (target) {
+          toolHeader.push(span("  ", {}));
+          toolHeader.push(span(target, { fg: palette.mutedFg }));
+        }
+        if (isLong) {
           toolHeader.push(span("  ·  ", { fg: palette.mutedFg - 3 }));
           toolHeader.push(span(`${contentLines} lines`, { fg: palette.mutedFg }));
-          toolHeader.push(span("  ⤢ expand", { fg: palette.mutedFg - 5, italic: true }));
-        } else if (isLong) {
-          toolHeader.push(span("  ·  ", { fg: palette.mutedFg - 3 }));
-          toolHeader.push(span("⤡ collapse", { fg: palette.mutedFg - 5, italic: true }));
         }
 
         // Diff badge in the header (+adds / −dels)
@@ -1113,21 +1152,16 @@ export async function runREPL(
           continue;
         }
 
-        // Tool content — collapsed: framed 3-line peek; expanded: full body
-        if (isLong && isCollapsed) {
-          const preview = msg.content.split("\n").slice(0, 3);
-          for (const pLine of preview) {
-            lines.push([
-              span("    │ ", { fg: palette.mutedFg - 5 }),
-              span(pLine.slice(0, contentW - 8), { fg: palette.toolFg }),
-            ]);
-          }
-          lines.push([span("    ╵ …", { fg: palette.mutedFg - 5, dim: true })]);
-        } else {
-          const mdLines = renderMarkdown(msg.content, contentW - 4, {
+        // Tool content — collapsed: header only (no peek, Claude-style);
+        // expanded: full body under a ⎿ tree branch.
+        if (!(isLong && isCollapsed)) {
+          const body = renderMarkdown(msg.content, contentW - 6, {
             ...mdTheme, text: palette.toolFg,
-          }).map(l => (l.length > 0 ? [span("    "), ...l] : l));
-          lines.push(...mdLines);
+          });
+          body.forEach((l, i) => {
+            if (i === 0) lines.push([span("  ⎿ ", { fg: palette.mutedFg - 5 }), ...l]);
+            else lines.push(l.length > 0 ? [span("     "), ...l] : l);
+          });
         }
         lines.push([]);
         continue;
@@ -3156,9 +3190,11 @@ export async function runREPL(
         chatLinesDirty = true;
         app.requestRender();
 
-        // Pre-send check: if real token count from last call exceeded budget,
-        // compact the stored messages BEFORE building the send array.
-        if (lastContextSize > SAFE_CONTEXT_BUDGET && currentApiMessages.length > 8) {
+        // Pre-send check: if real token count from last call passed the
+        // window-relative threshold, compact the stored messages BEFORE building
+        // the send array. Threshold scales with the active tier window so this
+        // fires on small tiers too (old fixed 60K never triggered on fast 28K).
+        if (lastContextSize > compactThreshold() && currentApiMessages.length > 8) {
           currentApiMessages = compactMessagesForApi(currentApiMessages, getContextWindow(), compactOpts());
         }
 
@@ -3211,6 +3247,11 @@ export async function runREPL(
                 lastModel = chunk.metadata.model ?? "Auto";
                 lastTier  = chunk.metadata.tier ?? "smart";
                 lastClamp = parseClamp(chunk.metadata.reason);
+                // Scale the explore budget to the served tier's window — a big
+                // window (reason 118K) legitimately explores far past the old
+                // fixed 60K before it's "stuck". Router escalation can change
+                // the tier mid-task, so re-scale on every response.
+                phaseTracker.scaleForWindow(getContextWindow());
                 const [inp, out] = TIER_COSTS[chunk.metadata.tier] ?? [0.5, 1.5];
                 const turnCost = (chunk.usage.prompt_tokens * inp + chunk.usage.completion_tokens * out) / 1_000_000;
                 sessionCost += turnCost;
@@ -3220,15 +3261,25 @@ export async function runREPL(
                   completion: totalTokens.completion + chunk.usage.completion_tokens,
                 };
                 lastContextSize = chunk.usage.prompt_tokens;
+                ctxProcessedSinceCompact += chunk.usage.total_tokens
+                  ?? chunk.usage.prompt_tokens + chunk.usage.completion_tokens;
+                sessionCachedTokens += chunk.usage.cached_tokens ?? 0;
                 totalRequests++;
                 const recordedTier = forceTier ?? lastTier;
                 tierCounts.set(recordedTier, (tierCounts.get(recordedTier) ?? 0) + 1);
                 // 9.4: doom-loop signal for THIS response (D6 wire contract).
                 turnLoopSignal = chunk.metadata.loop_signal ?? null;
                 checkBudgetGuards();
-                // 9.5: attribute this response to the current phase.
-                checkPhaseBudget(chunk.usage.total_tokens
-                  ?? chunk.usage.prompt_tokens + chunk.usage.completion_tokens);
+                // 9.5: attribute this response to the current phase. The
+                // doom-loop signal (identical call/results repeated) is the real
+                // "stuck" evidence — without it, an explore overage is a soft
+                // warn, not a hard pause (legit big-data reads a lot).
+                checkPhaseBudget(
+                  chunk.usage.total_tokens
+                    ?? chunk.usage.prompt_tokens + chunk.usage.completion_tokens,
+                  chunk.usage.completion_tokens,
+                  turnLoopSignal?.results_identical === true,
+                );
               }
               break;
             case "done":
@@ -3250,14 +3301,51 @@ export async function runREPL(
         // 9.4/9.5: budget hard-cap or phase pause — finish rendering this
         // response but run no further agent rounds this turn.
         if ((budgetStop || phaseTracker.paused) && pendingToolCalls && pendingToolCalls.length > 0) {
-          messages.push({
-            role: "system", kind: "error",
-            content: budgetStop
-              ? "⛔ Pending tool calls skipped — session cost cap reached (see message above)."
-              : "⛔ Pending tool calls skipped — exploration budget exhausted with no artifact (see message above).",
+          if (budgetStop) {
+            messages.push({
+              role: "system", kind: "error",
+              content: "⛔ Pending tool calls skipped — session cost cap reached (see message above).",
+            });
+            chatLinesDirty = true;
+            break;
+          }
+          // Phase pause: show interactive Continue/Stop prompt
+          const shouldContinue = await new Promise<boolean>((resolve) => {
+            budgetPausePrompt = { resolve };
+            budgetPauseSelected = 0;
+            app.requestRender();
           });
+          budgetPausePrompt = null;
+          app.requestRender();
+          if (!shouldContinue) {
+            messages.push({
+              role: "system", kind: "error",
+              content: "⛔ Pending tool calls skipped — exploration stopped by user.",
+            });
+            chatLinesDirty = true;
+            break;
+          }
+          // User chose Continue. Don't just reset and re-explore from zero —
+          // that re-reads the same files and hits the same wall (the loop the
+          // user reported). Instead: (1) give a larger explore budget so the
+          // resume can't stall at the identical point, and (2) inject a
+          // directive that forces action over more reading. The mechanical
+          // compaction on the next send (above) already trims stale reads.
+          phaseTracker.resumeAfterContinue();
+          currentApiMessages = [
+            ...currentApiMessages,
+            {
+              role: "system",
+              content:
+                "You have explored enough for this task. Do NOT re-read files you have " +
+                "already read — their contents are still available in this context (older " +
+                "reads may be trimmed; if you need specifics from one, read the session " +
+                `ledger at ${ledger.path} instead of re-reading the source). Take a concrete ` +
+                "action NOW: write or edit a file, run the build/verify command, or call " +
+                "ask_user if you are blocked on a decision. Produce an artifact this round.",
+            },
+          ];
           chatLinesDirty = true;
-          break;
         }
 
         if (pendingToolCalls && pendingToolCalls.length > 0) {
@@ -3402,12 +3490,23 @@ export async function runREPL(
               }
             }
 
-            // Track modified files from tool results (for sidebar + /undo)
-            if (tc.function.name === "write_file" || tc.function.name === "edit_file" || tc.function.name === "multi_edit" || tc.function.name === "apply_patch") {
+            // Track modified files from tool results (for sidebar + /undo).
+            // Match native tools AND MCP filesystem tools (e.g.
+            // "mcp__filesystem__write_file") by their base name after the
+            // "mcp__<server>__" prefix — otherwise MCP writes complete silently
+            // and the sidebar shows "Modified Files 0" despite real writes.
+            const _rawName = tc.function.name;
+            const _baseName = _rawName.includes("__")
+              ? _rawName.slice(_rawName.lastIndexOf("__") + 2)
+              : _rawName;
+            const _isWrite = _baseName === "write_file" || _baseName === "create_file";
+            const _isEdit  = _baseName === "edit_file" || _baseName === "edit_block" || _baseName === "multi_edit";
+            const _isPatch = _baseName === "apply_patch";
+            if (_isWrite || _isEdit || _isPatch) {
               try {
                 const args = JSON.parse(tc.function.arguments);
                 let touched: { path: string; kind: "write" | "edit" }[] = [];
-                if (tc.function.name === "apply_patch") {
+                if (_isPatch) {
                   const parsed = parsePatch(String(args.patch ?? ""));
                   if (parsed.ok) {
                     for (const op of parsed.ops) {
@@ -3422,7 +3521,7 @@ export async function runREPL(
                   }
                 } else {
                   const filePath = args.path ?? args.file_path ?? "";
-                  if (filePath) touched = [{ path: filePath, kind: tc.function.name === "write_file" ? "write" : "edit" }];
+                  if (filePath) touched = [{ path: filePath, kind: _isWrite ? "write" : "edit" }];
                 }
                 for (const t of touched) {
                   if (!toolResult.startsWith("Error")) {
@@ -3494,10 +3593,11 @@ export async function runREPL(
           currentResponseWrites = [];
         }
 
-        // Auto-compact when actual context exceeds the safe budget.
-        // Uses SAFE_CONTEXT_BUDGET (60K) since the router can switch models
-        // between calls and some models have very small context windows (nano=16K, fast=32K).
-        if (apiMessages.length > 8 && lastContextSize > SAFE_CONTEXT_BUDGET) {
+        // Auto-compact when actual context passes the window-relative
+        // threshold (COMPACT_TRIGGER_RATIO × active tier window). Fires on every
+        // tier — including small ones (fast 28K → ~22K) where the old fixed 60K
+        // threshold was above the window and so never triggered (dead code).
+        if (apiMessages.length > 8 && lastContextSize > compactThreshold()) {
           void compactContext();
         }
 
@@ -3628,6 +3728,7 @@ export async function runREPL(
           `Before continuing, read_file ${ledger.path} (section "Session state") to recover it.]`
         : "";
       compactionCount++;
+      ctxProcessedSinceCompact = 0; // checkpoint — churn counter restarts
 
       // Replace apiMessages: [system seed, summary stub, last 4]
       const last4  = apiMessages.slice(-4);
@@ -3716,10 +3817,10 @@ export async function runREPL(
     const inputInnerLeft0 = colL + 3;
     const inputInnerW0    = (showSidebar ? colS : colR) - 1 - inputInnerLeft0;
     let innerRows: number;
-    const PERM_CARD_H = permRequest ? 4 : 0; // separate card above input when permission pending
+    const PERM_CARD_H = (permRequest || budgetPausePrompt) ? 4 : 0;
     if (isBusy) innerRows = 1;
     else if (askRequest) innerRows = Math.min(8, askRequest.options.length + 2);
-    else if (permRequest) innerRows = 1; // input locked — permission card floats above
+    else if (permRequest || budgetPausePrompt) innerRows = 1; // input locked — card floats above
     else innerRows = Math.max(1, Math.min(MAX_INPUT_ROWS, field.visualRowCount(inputInnerW0 - 2)));
     const INPUT_BOX_H = innerRows + 2;               // + top/bottom border rows
     const INPUT_TOTAL = INPUT_BOX_H + META_H + GAP_H + FOOTER_H + PERM_CARD_H;
@@ -3931,6 +4032,63 @@ export async function runREPL(
     }
 
     // ═══════════════════════════════════════════════════════════════════
+    // BUDGET PAUSE CARD (floating above input when exploration pauses)
+    // ═══════════════════════════════════════════════════════════════════
+
+    if (budgetPausePrompt && PERM_CARD_H > 0 && !permRequest) {
+      const bpY = inputAreaR.y;
+      const bpInnerLeft = colL + 3;
+      const bpInnerW = (showSidebar ? colS : colR) - 1 - bpInnerLeft;
+      const bpRight = (showSidebar ? colS : colR) - 1;
+
+      // Top border with warning color
+      buf.write(bpY, colL + 1, "╭", { fg: 208 });
+      for (let c = colL + 2; c < bpRight; c++) buf.write(bpY, c, "─", { fg: 208 });
+      buf.write(bpY, bpRight, "╮", { fg: 208 });
+      // Bottom border dim
+      buf.write(bpY + PERM_CARD_H - 1, colL + 1, "╰", { fg: palette.border });
+      for (let c = colL + 2; c < bpRight; c++) buf.write(bpY + PERM_CARD_H - 1, c, "─", { fg: palette.border });
+      buf.write(bpY + PERM_CARD_H - 1, bpRight, "╯", { fg: palette.border });
+
+      // Row 1: message
+      const bpR: Rect = { x: bpInnerLeft, y: bpY + 1, width: bpInnerW, height: 1 };
+      drawStyledLine(buf, bpR, bpR.y, [
+        span("⛔ ", { fg: 208 }),
+        span("Exploration budget exhausted — agent may be stuck. Continue?", { fg: "white", bold: true }),
+      ]);
+
+      // Row 2: Continue / Stop buttons
+      const bpBtnY = bpY + 2;
+      const BP_BTNS = [
+        { label: "Continue", key: "c", color: 114 },
+        { label: "Stop",     key: "s", color: 204 },
+      ];
+      let bbx = bpInnerLeft;
+      for (let i = 0; i < BP_BTNS.length; i++) {
+        const b = BP_BTNS[i]!;
+        const focused = budgetPauseSelected === i;
+        const pill: StyledLine = [
+          span(focused ? "❯ " : "  ", { fg: focused ? b.color : 240, bold: true }),
+          span(b.label, { fg: focused ? b.color : 245, bold: focused }),
+          span(` ·${b.key}`, { fg: focused ? b.color : 240 }),
+          span("  ", {}),
+        ];
+        const pr2: Rect = { x: bbx, y: bpBtnY, width: bpInnerW - (bbx - bpInnerLeft), height: 1 };
+        drawStyledLine(buf, pr2, bpBtnY, pill);
+        bbx += 2 + b.label.length + 3 + 2;
+      }
+      // Right hint
+      const bpHint = "tab move · enter select";
+      const bpHintW = stringWidth(bpHint);
+      const bpHintX = bpInnerLeft + bpInnerW - bpHintW;
+      if (bpHintX > bbx + 2) {
+        drawStyledLine(buf, { x: bpHintX, y: bpBtnY, width: bpHintW, height: 1 }, bpBtnY, [
+          span(bpHint, { fg: 240 }),
+        ]);
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
     // INPUT AREA
     // ═══════════════════════════════════════════════════════════════════
 
@@ -4024,13 +4182,12 @@ export async function runREPL(
         span(aq.multi ? "↑↓ move · space toggle · enter confirm · esc skip"
                       : "↑↓ move · enter select · esc skip", { fg: palette.mutedFg - 3, bg: inputBg }),
       ]);
-    } else if (permRequest) {
-      // Input locked while permission card is shown above
+    } else if (permRequest || budgetPausePrompt) {
       hideCursor();
       const fieldTop = inputBoxY + 1;
       drawStyledLine(buf, { x: inputInnerLeft, y: fieldTop, width: inputInnerW, height: 1 }, fieldTop, [
         span("› ", { fg: palette.border, bg: inputBg }),
-        span("Waiting for approval…", { fg: 245, bg: inputBg, italic: true }),
+        span(budgetPausePrompt ? "Budget paused — choose above…" : "Waiting for approval…", { fg: 245, bg: inputBg, italic: true }),
       ]);
     } else if (isBusy) {
       // Shimmer along the card's top border instead of a floating bar
@@ -4238,7 +4395,6 @@ export async function runREPL(
 
       // ── Context section ─────────────────────────────────────────────
       sbHeader("Context");
-      const ctxTotalWindow = Object.values(TIER_CONTEXT_WINDOW).reduce((a, b) => a + b, 0);
       const ctxWindow = getContextWindow();
       const ctxUsed = lastContextSize;
       const ctxPct = ctxWindow > 0
@@ -4246,9 +4402,15 @@ export async function runREPL(
         : 0;
       const ctxRemaining = Math.max(0, ctxWindow - ctxUsed);
       const ctxColor = ctxPct > 80 ? 204 : ctxPct > 50 ? 222 : 75;
+      const compactAtPct = Math.round(COMPACT_TRIGGER_RATIO * 100);
 
-      sbKV("Max Window", tokVal(ctxTotalWindow));
-      sbKV("Current",    tokVal(ctxWindow));
+      // Active tier window — the number that actually caps this session. (The
+      // old "Max Window" summed every tier's window, which no single request
+      // ever gets — misleading. Show the live window instead.)
+      sbKV("Window", [
+        span(formatTok(ctxWindow), { fg: palette.chatFg as number | "white", bold: true }),
+        span(`  ${lastTier}`, { fg: palette.mutedFg }),
+      ]);
       sbKV("Used", [
         span(formatTok(ctxUsed), { fg: ctxColor, bold: true }),
         span(` ${ctxPct}%`, { fg: ctxColor }),
@@ -4265,6 +4427,21 @@ export async function runREPL(
         sRow++;
       }
       sbKV("Remaining", tokVal(ctxRemaining));
+      sbKV("Compact at", [span(`${compactAtPct}%`, { fg: palette.mutedFg })]);
+      sbKV("Processed", [
+        span(formatTok(ctxProcessedSinceCompact), { fg: palette.mutedFg }),
+        span(compactionCount > 0 ? `  ${compactionCount} compaction${compactionCount === 1 ? "" : "s"}` : "  since start", { fg: 238 }),
+      ]);
+      // Prefix-cache hits — visible proof the cache is working + the saving.
+      if (sessionCachedTokens > 0) {
+        const cachePct = totalTokens.prompt > 0
+          ? Math.round((sessionCachedTokens / totalTokens.prompt) * 100)
+          : 0;
+        sbKV("Cached", [
+          span(formatTok(sessionCachedTokens), { fg: 114 }),
+          span(`  ${cachePct}% of input`, { fg: 238 }),
+        ]);
+      }
       sbBlank();
 
       // ── MCP Servers section ──────────────────────────────────────────
@@ -4613,6 +4790,7 @@ export async function runREPL(
 
   unsubscribers.push(app.onKey("tab", () => {
     if (dialog.active) return;
+    if (budgetPausePrompt) { budgetPauseSelected = (budgetPauseSelected + 1) % 2; app.requestRender(); return; }
     if (permRequest) { permSelected = (permSelected + 1) % 4; app.requestRender(); return; }
     if (slashSuggest) {
       // Tab completes the highlighted command into the input (with trailing space).
@@ -4778,6 +4956,13 @@ export async function runREPL(
       app.requestRender();
       return;
     }
+    if (budgetPausePrompt) {
+      const bp = budgetPausePrompt;
+      budgetPausePrompt = null;
+      bp.resolve(budgetPauseSelected === 0); // 0=Continue(true), 1=Stop(false)
+      app.requestRender();
+      return;
+    }
     if (permRequest) {
       const pr = permRequest;
       const DECISIONS: PermDecision[] = ["allow_once", "deny", "allow_session", "allow_always"];
@@ -4866,6 +5051,15 @@ export async function runREPL(
         return;
       }
       return; // swallow other keys while the picker is open
+    }
+    // Budget pause prompt
+    if (budgetPausePrompt) {
+      const bp = budgetPausePrompt;
+      const ch = ev.char?.toLowerCase();
+      if (ch === "c") { budgetPausePrompt = null; bp.resolve(true); app.requestRender(); return; }
+      if (ch === "s" || ev.key === "escape") { budgetPausePrompt = null; bp.resolve(false); app.requestRender(); return; }
+      if (ev.key === "left" || ev.key === "right") { budgetPauseSelected = (budgetPauseSelected + 1) % 2; app.requestRender(); return; }
+      return;
     }
     // Permission prompt
     if (permRequest) {

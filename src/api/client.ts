@@ -61,7 +61,7 @@ export interface ChatResponse {
     message: { role: string; content: string | null; tool_calls?: ToolCall[] };
     finish_reason: string;
   }>;
-  usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+  usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number; cached_tokens?: number };
   x_klaatai?: KlaatAIMetadata;
 }
 
@@ -86,7 +86,7 @@ export interface StreamChunk {
   text?: string;
   tool_calls?: ToolCall[];
   metadata?: KlaatAIMetadata;
-  usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+  usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number; cached_tokens?: number };
   quota?: QuotaSnapshot;
   error?: string;
 }
