@@ -67,6 +67,8 @@ export interface Config {
   compat?: {
     /** Discover skills from ~/.claude/skills and .claude/skills (default: true). */
     importClaudeSkills?: boolean;
+    /** Import MCP servers from .mcp.json / .claude.json / .cursor/mcp.json (default: true). */
+    importMcpConfigs?: boolean;
   };
 }
 

@@ -34,11 +34,15 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import type { ToolDefinition } from "../api/client.js";
 import { storedMcpToken, refreshMcpToken, authorizeMcpServer } from "./oauth.js";
+import {
+  loadImportedMcpServers,
+  mergeNativeMcpConfig,
+  type MCPLoadOptions,
+} from "./import.js";
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -57,46 +61,48 @@ export interface MCPServerConfig {
   description?: string;
 }
 
-export interface MCPConfig {
-  servers: Record<string, MCPServerConfig>;
+/** MCP server config plus optional source label (for imported servers). */
+export interface MCPServerEntry extends MCPServerConfig {
+  /** Config file the server was loaded from, e.g. ".cursor/mcp.json". */
+  source?: string;
 }
 
-/**
- * Load MCP config by merging project-level and user-level configs.
- * Project-level takes precedence for server names that appear in both.
- */
-export function loadMCPConfig(projectRoot: string): MCPConfig {
-  const paths = [
-    join(homedir(), ".klaatai", "mcp.json"),   // user-level (loaded first, lower priority)
-    join(projectRoot, ".klaatai", "mcp.json"), // project-level (higher priority)
-  ];
+export interface MCPConfig {
+  servers: Record<string, MCPServerEntry>;
+}
 
-  const merged: MCPConfig = { servers: {} };
-  for (const p of paths) {
-    if (existsSync(p)) {
-      try {
-        const raw = readFileSync(p, "utf-8");
-        const cfg = JSON.parse(raw) as Partial<MCPConfig>;
-        if (cfg.servers && typeof cfg.servers === "object") {
-          Object.assign(merged.servers, cfg.servers);
-        }
-      } catch { /* ignore malformed JSON */ }
-    }
-  }
+export type { MCPLoadOptions } from "./import.js";
+
+/**
+ * Load MCP config by merging external imports and KlaatCode native configs.
+ * Precedence (highest wins): .klaatai/mcp.json > ~/.klaatai/mcp.json >
+ * .mcp.json > .claude.json > .cursor/mcp.json.
+ */
+export function loadMCPConfig(projectRoot: string, opts?: MCPLoadOptions): MCPConfig {
+  const home = opts?.homeDir ?? homedir();
+  const loadOpts = {
+    projectRoot,
+    homeDir: home,
+    importMcpConfigs: opts?.importMcpConfigs,
+    onLog: opts?.onLog,
+  };
+
+  const merged: Record<string, MCPServerEntry> = loadImportedMcpServers(loadOpts);
+  mergeNativeMcpConfig(merged, projectRoot, home, loadOpts.onLog);
 
   // Always inject process.cwd() as the allowed directory for the filesystem
   // MCP server, regardless of what path was saved in mcp.json. This ensures
   // Klaat Code always scopes the filesystem server to the current project
   // directory rather than wherever the config was first written (e.g. HOME).
-  for (const cfg of Object.values(merged.servers)) {
+  for (const cfg of Object.values(merged)) {
     const args = cfg.args ?? [];
-    const fsIdx = args.findIndex(a => a.includes("server-filesystem"));
+    const fsIdx = args.findIndex((a: string) => a.includes("server-filesystem"));
     if (fsIdx !== -1) {
       cfg.args = [...args.slice(0, fsIdx + 1), process.cwd()];
     }
   }
 
-  return merged;
+  return { servers: merged };
 }
 
 // ─── JSON-RPC types ───────────────────────────────────────────────────────────
@@ -156,6 +162,8 @@ interface PendingCall {
 
 export class MCPServerClient {
   readonly name: string;
+  /** Config file this server was loaded from (undefined for runtime /mcp add). */
+  readonly source?: string;
   private _config:  MCPServerConfig;
   private _proc:    ChildProcess | null = null;
   private _buffer:  string = "";
@@ -168,8 +176,9 @@ export class MCPServerClient {
   status:        MCPStatus  = "idle";
   statusMessage: string     = "";
 
-  constructor(name: string, config: MCPServerConfig, onStatusChange?: () => void) {
+  constructor(name: string, config: MCPServerConfig, onStatusChange?: () => void, source?: string) {
     this.name             = name;
+    this.source           = source;
     this._config          = config;
     this._onStatusChange  = onStatusChange;
   }
@@ -517,7 +526,8 @@ export class MCPManager {
    */
   connect(config: MCPConfig): void {
     for (const [name, serverCfg] of Object.entries(config.servers)) {
-      const client = new MCPServerClient(name, serverCfg, this._onStatusChange);
+      const { source, ...cfg } = serverCfg;
+      const client = new MCPServerClient(name, cfg, this._onStatusChange, source);
       this._servers.set(name, client);
       // Fire-and-forget: errors set client.status = "error"
       void client.connect();

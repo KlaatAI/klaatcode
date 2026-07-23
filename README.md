@@ -285,7 +285,7 @@ Full MCP client, both transports:
 - **stdio** — local servers, configured in `.klaatai/mcp.json`, built-in presets (filesystem, GitHub, Postgres, Puppeteer, Brave Search, Fetch, …)
 - **Streamable HTTP** — remote servers via `"url"` config or `/mcp add <url>`; SSE and JSON responses, session management, and **OAuth 2.1** (discovery + dynamic client registration + PKCE browser flow) when the server requires auth — tokens cached in `~/.klaatai/mcp-oauth.json`
 
-Manage live with `/mcp`.
+Manage live with `/mcp`. On startup, KlaatCode can also **import MCP servers** from existing tool configs in the project (`.mcp.json`, `.claude.json`, `.cursor/mcp.json`) — native `.klaatai/mcp.json` always wins on name collisions. Disable with `"compat": { "importMcpConfigs": false }` in `config.json`.
 
 ### Git Integration
 
@@ -457,6 +457,8 @@ klaatcode serve --port 4200
 | `attentionOrder` | `on` / `off` | Arrange old history so the most relevant turns sit where models attend |
 | `maxSessionCost` | USD number | Hard session cost cap — pauses agent rounds when reached |
 | `phaseBudgets` | `on` / `off` | Per-phase token budgets; pause a stuck explore phase before it burns the budget |
+| `compat.importClaudeSkills` | `true` / `false` | Discover skills from Claude Code directories (default: on) |
+| `compat.importMcpConfigs` | `true` / `false` | Import MCP servers from `.mcp.json`, `.claude.json`, `.cursor/mcp.json` (default: on) |
 
 Full reference, incl. every config key: [klaatai.com/docs/configuration](https://klaatai.com/docs/configuration).
 
