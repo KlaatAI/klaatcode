@@ -69,6 +69,7 @@ import { MCPManager, loadMCPConfig, type MCPServerConfig } from "../mcp/client.j
 import { seedSystemMessages, MODE_PROMPTS } from "../agent/system-prompt.js";
 import { checkForUpdate } from "../utils/update.js";
 import { readClipboardImage, MAX_IMAGE_BYTES } from "../utils/clipboard-image.js";
+import { copyToClipboard } from "../utils/clipboard.js";
 import { SessionLedger } from "../agent/session-ledger.js";
 import { COMPACTION_PROMPT, extractSummary, MAX_CONSECUTIVE_COMPACT_FAILURES } from "../agent/compaction-prompt.js";
 import { compactMessagesForApi } from "../agent/compaction.js";
@@ -960,21 +961,6 @@ export async function runREPL(
   let inputSelecting = false;
 
   // ─── Clipboard helpers ────────────────────────────────────────────────────
-
-  /** Write text to the system clipboard cross-platform. Returns true on success. */
-  function copyToClipboard(text: string): boolean {
-    try {
-      if (process.platform === "darwin") {
-        spawnSync("pbcopy", [], { input: text, encoding: "utf-8" });
-      } else if (process.platform === "win32") {
-        spawnSync("clip", [], { input: text, encoding: "utf-8", shell: true });
-      } else {
-        const r = spawnSync("xclip", ["-selection", "clipboard"], { input: text, encoding: "utf-8" });
-        if (r.error) spawnSync("xsel", ["--clipboard", "--input"], { input: text, encoding: "utf-8" });
-      }
-      return true;
-    } catch { return false; }
-  }
 
   /** Convert StyledLine[] to plain text (strip all styling). */
   function styledLinesToText(lines: StyledLine[]): string {
