@@ -78,6 +78,7 @@ import {
   renderSessionMarkdown,
   resolveExportPath,
 } from "./export-session.js";
+import { createSessionLifecycle } from "./session-lifecycle.js";
 import {
   TIER_COSTS, VALID_TIERS, TIER_CONTEXT_WINDOW,
   COMPACT_TRIGGER_RATIO,
@@ -4700,10 +4701,16 @@ export async function runREPL(
   let _quitting = false;
   let _resolveQuit: (() => void) | null = null;
 
+  // Guards session_start / session_end so multiple quit triggers
+  // (/exit, Ctrl+D, Ctrl+C) cannot double-fire session_end.
+  const sessionLife = createSessionLifecycle((event) => {
+    runHooks(event);
+  });
+
   function quit(): void {
     if (_quitting) return;
     _quitting = true;
-    runHooks("session_end");
+    sessionLife.end();
     clearInterval(tipTimer);
     for (const u of unsubscribers) u();
     mcpManager.disconnectAll();
@@ -5509,7 +5516,7 @@ export async function runREPL(
   }
 
   // Fire once after boot (config/auth/MCP loaded) and before the first prompt.
-  runHooks("session_start");
+  sessionLife.start();
 
   // Wait until quit() is called
   await new Promise<void>((resolve) => {
