@@ -411,6 +411,27 @@ export const TOKYO_NIGHT_PALETTE: ThemePalette = {
   assistantFg:  111,  // blue
 };
 
+/** Rosé Pine — warm muted purple with rose & pine accents */
+export const ROSE_PINE_PALETTE: ThemePalette = {
+  accent:       "#c4a7e7",  // iris
+  dimText:      "#6e6a86",  // muted
+  userColor:    "#ebbcba",  // rose
+  border:       "#26233a",  // overlay
+  thumb:        "#403d52",
+  bg:           null,
+  inputBg:      235,
+  chatFg:       189,  // soft lavender-white (text)
+  mutedFg:      103,  // muted
+  toolFg:       245,
+  codeFg:       152,  // foam / soft teal
+  codeBg:       236,
+  headingFg:    "white",
+  sidebarLabel: 103,
+  sidebarValue: 189,
+  userFg:       217,  // rose
+  assistantFg:  183,  // iris
+};
+
 export type Theme =
   | "dark"
   | "light"
@@ -428,12 +449,14 @@ export type Theme =
   | "matrix"
   | "cobalt"
   | "midnight"
-  | "tokyo-night";
+  | "tokyo-night"
+  | "rose-pine";
 
 export const THEME_NAMES: Theme[] = [
   "dark", "light", "dracula", "nord", "ayu",
   "catppuccin", "catppuccin-latte", "catppuccin-frappe", "catppuccin-macchiato",
   "gruvbox", "neon", "synthwave", "ember", "matrix", "cobalt", "midnight", "tokyo-night",
+  "rose-pine",
 ];
 
 export const THEME_DESCRIPTIONS: Record<Theme, string> = {
@@ -454,6 +477,7 @@ export const THEME_DESCRIPTIONS: Record<Theme, string> = {
   cobalt:     "Cobalt — deep blue with golden highlights",
   midnight:   "Midnight — indigo depths with sky blue & lavender",
   "tokyo-night": "Tokyo Night — deep navy with cool blue & green",
+  "rose-pine":   "Rosé Pine — warm muted purple with rose & pine",
 };
 
 export function getPalette(theme: Theme): ThemePalette {
@@ -474,6 +498,7 @@ export function getPalette(theme: Theme): ThemePalette {
     case "cobalt":     return COBALT_PALETTE;
     case "midnight":   return MIDNIGHT_PALETTE;
     case "tokyo-night": return TOKYO_NIGHT_PALETTE;
+    case "rose-pine":   return ROSE_PINE_PALETTE;
     default:           return DARK_PALETTE;
   }
 }

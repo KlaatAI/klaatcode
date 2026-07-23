@@ -185,7 +185,7 @@ Markdown responses render with per-language syntax highlighting directly in the 
 - Slash-command autocomplete — type `/` for a fuzzy-filtered live suggestion strip
 - Collapsible tool output and thinking blocks — click to expand
 - Full mouse support: click, scroll, drag-select
-- 14 themes: `dark`, `light`, `dracula`, `nord`, `ayu`, `catppuccin`, `gruvbox`, `neon`, `synthwave`, `ember`, `matrix`, `cobalt`, `midnight`, `tokyo-night` (`/theme`)
+- Themes via `/theme`: `dark`, `light`, `dracula`, `nord`, `ayu`, `catppuccin` (+ latte/frappe/macchiato), `gruvbox`, `neon`, `synthwave`, `ember`, `matrix`, `cobalt`, `midnight`, `tokyo-night`, `rose-pine`
 - Vim keybindings (`/vimmode on`)
 - Sidebar: usage, context window fill, MCP servers, routing analytics
 - Diffs render as colored, syntax-highlighted unified-diff blocks — including multi-file patches
