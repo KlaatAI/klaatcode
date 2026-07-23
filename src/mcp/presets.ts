@@ -100,6 +100,17 @@ export const MCP_PRESETS: MCPPreset[] = [
       description: "SQLite access via MCP",
     },
   },
+  {
+    id:          "slack",
+    name:        "Slack",
+    description: "Read channels, post messages, and search Slack history",
+    envVars:     ["SLACK_BOT_TOKEN", "SLACK_TEAM_ID"],
+    config: {
+      command:     "npx",
+      args:        ["-y", "@modelcontextprotocol/server-slack"],
+      description: "Slack API via MCP — requires SLACK_BOT_TOKEN and SLACK_TEAM_ID env vars",
+    },
+  },
 ];
 
 /** Look up a preset by id (case-insensitive). */
