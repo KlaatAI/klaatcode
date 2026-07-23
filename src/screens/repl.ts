@@ -1298,7 +1298,7 @@ export async function runREPL(
   // STDIN and, for before_tool, can BLOCK the call: exit code 2 (stderr =
   // reason) or stdout {"decision":"block","reason":"…"}.
 
-  type HookEvent = "before_tool" | "after_tool" | "before_message" | "after_message";
+  type HookEvent = "before_tool" | "after_tool" | "before_message" | "after_message" | "session_start" | "session_end";
   type HookEntry = string | { command: string; matcher?: string; timeout?: number };
   type HooksConfig = Partial<Record<HookEvent, HookEntry[]>>;
 
@@ -2044,7 +2044,7 @@ export async function runREPL(
           "  /review [ref]     — AI code review of current diff (default: git diff HEAD)",
           "  /commit           — generate a git commit message with AI and confirm before committing",
           "  /skill [name]     — invoke a saved prompt skill; /skill list; /skill new <name>",
-          "  /hooks            — list configured lifecycle hooks (before/after tool & message)",
+          "  /hooks            — list configured lifecycle hooks (session/message/tool)",
           "  /why              — explain last routing decision",
           "  /tier [name]      — lock a Klaatu routing tier (nano/fast/code/reason/heavy); no arg = picker; /tier smart = auto",
           "  /model            — pick the model: Klaatu or a custom third-party API",
@@ -2950,18 +2950,23 @@ export async function runREPL(
         // ── /hooks — list configured hooks ───────────────────────────────
         if (slash === "/hooks") {
           const hooks = loadHooks();
-          const events: HookEvent[] = ["before_message", "after_message", "before_tool", "after_tool"];
+          const events: HookEvent[] = [
+            "session_start", "session_end",
+            "before_message", "after_message", "before_tool", "after_tool",
+          ];
           const hasAny = events.some(e => (hooks[e]?.length ?? 0) > 0);
           if (!hasAny) {
             pushSystemMsg(
               "No hooks configured.\n\n" +
               "Create `.klaatai/hooks.json` or `~/.klaatai/hooks.json`:\n\n" +
               "```json\n{\n" +
+              '  "session_start": ["echo \\"session $KLAATAI_SESSION_ID started\\" >> /tmp/klaatai.log"],\n' +
               '  "after_message": ["afplay /System/Library/Sounds/Glass.aiff"],\n' +
               '  "before_tool":   ["echo \\"Tool: $KLAATAI_TOOL_NAME\\" >> /tmp/klaatai.log"],\n' +
-              '  "after_tool":    ["echo \\"Done: $KLAATAI_TOOL_NAME\\" >> /tmp/klaatai.log"]\n' +
+              '  "after_tool":    ["echo \\"Done: $KLAATAI_TOOL_NAME\\" >> /tmp/klaatai.log"],\n' +
+              '  "session_end":   ["echo \\"session ended\\" >> /tmp/klaatai.log"]\n' +
               "}\n```\n\n" +
-              "**Events:** `before_message` · `after_message` · `before_tool` · `after_tool`\n" +
+              "**Events:** `session_start` · `session_end` · `before_message` · `after_message` · `before_tool` · `after_tool`\n" +
               "**Env vars:** `KLAATAI_EVENT` · `KLAATAI_TOOL_NAME` · `KLAATAI_TOOL_ARGS` · `KLAATAI_PROJECT_ROOT` · `KLAATAI_SESSION_ID`",
             );
           } else {
@@ -4698,6 +4703,7 @@ export async function runREPL(
   function quit(): void {
     if (_quitting) return;
     _quitting = true;
+    runHooks("session_end");
     clearInterval(tipTimer);
     for (const u of unsubscribers) u();
     mcpManager.disconnectAll();
@@ -5501,6 +5507,9 @@ export async function runREPL(
       pushSystemMsg(`No session matching "${opts.resumeId}". Starting fresh.`, "error");
     }
   }
+
+  // Fire once after boot (config/auth/MCP loaded) and before the first prompt.
+  runHooks("session_start");
 
   // Wait until quit() is called
   await new Promise<void>((resolve) => {
