@@ -22,7 +22,18 @@ const MAX_SEND_CHARS = 240_000;    // hard cap on chars sent (~60K tokens)
 
 /** Output-token headroom reserved out of the tier window before budgeting input. */
 const OUTPUT_RESERVE_TOKENS = 8_000;
-const CHARS_PER_TOKEN = 4;
+/** Shared chars-per-token estimate — used by compaction, /context, and sidebar. */
+export const CHARS_PER_TOKEN = 4;
+
+/** Estimate token count from character length (bytes/4). */
+export function estimateTokensFromChars(chars: number): number {
+  return Math.max(0, Math.round(chars / CHARS_PER_TOKEN));
+}
+
+/** Estimate token count from text content. */
+export function estimateTokensFromText(text: string): number {
+  return estimateTokensFromChars(text.length);
+}
 
 const SEARCH_TOOLS = new Set(["grep", "glob", "list_dir", "web_search", "web_fetch", "todo_read"]);
 const MUTATING_TOOLS = new Set(["write_file", "edit_file", "multi_edit", "apply_patch"]);

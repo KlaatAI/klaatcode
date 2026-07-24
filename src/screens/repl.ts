@@ -72,7 +72,12 @@ import { readClipboardImage, MAX_IMAGE_BYTES } from "../utils/clipboard-image.js
 import { copyToClipboard } from "../utils/clipboard.js";
 import { SessionLedger } from "../agent/session-ledger.js";
 import { COMPACTION_PROMPT, extractSummary, MAX_CONSECUTIVE_COMPACT_FAILURES } from "../agent/compaction-prompt.js";
-import { compactMessagesForApi } from "../agent/compaction.js";
+import { compactMessagesForApi, estimateTokensFromChars } from "../agent/compaction.js";
+import {
+  computeContextBreakdown,
+  formatBreakdownLine,
+  formatContextBar,
+} from "../agent/context-breakdown.js";
 import { stripStrayTextToolCallArtifacts } from "../agent/text-tool-artifacts.js";
 import { drawWelcomeCard } from "./welcome-card.js";
 import {
@@ -97,7 +102,7 @@ import {
   type PermDecision,
 } from "../permissions/index.js";
 import { exec, spawnSync } from "child_process";
-import { appendFileSync, readFileSync, writeFileSync, unlinkSync, readdirSync, existsSync, mkdirSync } from "node:fs";
+import { appendFileSync, readFileSync, writeFileSync, unlinkSync, readdirSync, existsSync, mkdirSync, statSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { homedir, tmpdir } from "node:os";
 
@@ -711,7 +716,7 @@ export async function runREPL(
     { cmd: "/commit",     desc: "AI commit message + commit" },
     { cmd: "/compact",    desc: "Summarize context to free token window" },
     { cmd: "/cost",       desc: "Session cost + quota + context usage" },
-    { cmd: "/context",    desc: "What's in the context window vs compacted away" },
+    { cmd: "/context",    desc: "Token usage breakdown of the context window" },
     { cmd: "/diff",       desc: "Git diff (optionally one file)" },
     { cmd: "/doctor",     desc: "Diagnostics: auth, API, MCP, tools, config" },
     { cmd: "/exit",       desc: "Quit KLAAT CODE" },
@@ -1854,32 +1859,80 @@ export async function runREPL(
       }
 
       case "/context": {
-        // 9.6: visibility into what the model can still see vs what only
-        // survives in the ledger.
-        let sysN = 0, userN = 0, asstN = 0, toolN = 0, trimmedN = 0, chars = 0;
-        for (const m of apiMessages) {
-          if (m.role === "system") sysN++;
-          else if (m.role === "user") userN++;
-          else if (m.role === "assistant") asstN++;
-          else if (m.role === "tool") toolN++;
-          if (typeof m.content === "string") {
-            chars += m.content.length;
-            if (m.content.includes("chars trimmed")) trimmedN++;
-          }
-        }
+        const planMode = tabs.activeTab.label === "Plan";
+        const dialect = activeDialect();
+        const activeTools: ToolDefinition[] = planMode
+          ? [
+              ...TOOL_DEFINITIONS.filter(t => PLAN_READONLY_TOOLS.has(t.function.name)),
+              EXIT_PLAN_TOOL,
+            ]
+          : [
+              ...toolsForDialect(dialect, TOOL_DEFINITIONS),
+              ...(dialectIncludesExtras(dialect)
+                ? [...mcpManager.toolDefinitions, ...pluginRegistry.toolDefinitions]
+                : []),
+            ];
+
+        // Mirror the send path: inject the active tab's mode prompt and apply
+        // the same pre-send compaction so the breakdown matches the API window.
+        const isModePrompt = (m: Message) =>
+          m.role === "system" && typeof m.content === "string" &&
+          Object.values(TAB_SYSTEM_PROMPTS).includes(m.content);
+        const historyMsgs = apiMessages.filter(m => !isModePrompt(m));
+        let seedEnd = 0;
+        while (seedEnd < historyMsgs.length && historyMsgs[seedEnd]!.role === "system") seedEnd++;
+        const tabPrompt = TAB_SYSTEM_PROMPTS[tabs.activeTab.label];
+        const tabSystemMsg: Message | null = tabPrompt
+          ? { role: "system", content: tabPrompt }
+          : null;
+        const withMode = tabSystemMsg
+          ? [...historyMsgs.slice(0, seedEnd), tabSystemMsg, ...historyMsgs.slice(seedEnd)]
+          : [...historyMsgs];
+        const sendMsgs = compactMessagesForApi(withMode, getContextWindow(), compactOpts());
+
+        const breakdown = computeContextBreakdown(sendMsgs, activeTools);
         const window = getContextWindow();
-        const pct = window > 0 ? Math.round((lastContextSize / window) * 100) : 0;
-        const compactedStub = apiMessages.some(m =>
-          typeof m.content === "string" && m.content.startsWith("[Context compacted"));
+        const usedTok = lastContextSize > 0 ? lastContextSize : breakdown.estimatedTotal;
+        const pct = window > 0 ? Math.min(100, Math.round((usedTok / window) * 100)) : 0;
+        const apiNote = lastContextSize > 0 && Math.abs(lastContextSize - breakdown.estimatedTotal) > window * 0.02
+          ? `\n  (API last request: ${formatTok(lastContextSize)}; estimate: ${formatTok(breakdown.estimatedTotal)})`
+          : "";
+
+        let ledgerSize = "";
+        try {
+          ledgerSize = ` (${formatTok(estimateTokensFromChars(statSync(ledger.path).size))})`;
+        } catch { /* best-effort */ }
+
+        const sysLines = [
+          breakdown.system.core > 0 ? formatBreakdownLine("Core", breakdown.system.core) : "",
+          breakdown.system.environment > 0 ? formatBreakdownLine("Environment", breakdown.system.environment) : "",
+          breakdown.system.projectRules > 0 ? formatBreakdownLine("Project rules", breakdown.system.projectRules) : "",
+          breakdown.system.mode > 0 ? formatBreakdownLine("Mode", breakdown.system.mode) : "",
+          breakdown.system.other > 0 ? formatBreakdownLine("Other system", breakdown.system.other) : "",
+        ].filter(Boolean);
+
+        const trimmedNote = breakdown.trimmedToolResults > 0
+          ? `, ${breakdown.trimmedToolResults} trimmed`
+          : "";
+
         pushSystemMsg(
           `**Context window:**\n` +
-          `  Last request: ${formatTok(lastContextSize)} / ${formatTok(window)} toks (${pct}%)\n` +
-          `  In memory: ${apiMessages.length} messages (${sysN} system, ${userN} user, ${asstN} assistant, ${toolN} tool) ≈ ${formatTok(Math.round(chars / 4))} toks\n` +
-          `  Degraded in place: ${trimmedN} trimmed tool result${trimmedN === 1 ? "" : "s"}\n\n` +
-          `**Compacted away:**\n` +
-          `  Compactions this session: ${compactionCount}${compactedStub ? " (summary stub in context)" : ""}\n` +
-          `  Recoverable details: ${ledger.path}\n` +
-          `  (the model re-reads that file when it needs pre-compaction specifics)`
+          `  ${formatTok(usedTok)} / ${formatTok(window)} toks (${pct}%)${apiNote}\n` +
+          `  ${formatContextBar(pct)}\n\n` +
+          `**Breakdown** (chars÷4 estimate):\n` +
+          `  System prompt (${formatTok(breakdown.system.total)}):\n` +
+          (sysLines.length ? sysLines.join("\n") + "\n" : "    (none)\n") +
+          `  Conversation (${formatTok(breakdown.conversation.total)}):\n` +
+          formatBreakdownLine("User", breakdown.conversation.user, `(${breakdown.conversation.userMsgs} msgs)`) + "\n" +
+          formatBreakdownLine("Assistant", breakdown.conversation.assistant, `(${breakdown.conversation.assistantMsgs} msgs)`) + "\n" +
+          formatBreakdownLine("Tool results", breakdown.conversation.tool, `(${breakdown.conversation.toolMsgs} msgs${trimmedNote})`) + "\n" +
+          formatBreakdownLine("Tool schemas", breakdown.toolSchemas, `(${breakdown.toolCount} tools, ${dialect} dialect)`) + "\n" +
+          `  ─────────────────\n` +
+          `  Estimated total  ${formatTok(breakdown.estimatedTotal)}\n\n` +
+          `**Compaction:**\n` +
+          `  Compactions this session: ${compactionCount}${breakdown.compactedStub ? " (summary stub in context)" : ""}\n` +
+          `  Ledger: ${ledger.path}${ledgerSize}\n` +
+          `  (read the ledger when compacted details are needed)`
         );
         return true;
       }
