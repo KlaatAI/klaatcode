@@ -33,6 +33,10 @@ import { spawnSync as _openBrowser } from "node:child_process";
 import { version as VERSION } from "../package.json";
 import { loadProjectRules } from "./agent/system-prompt.js";
 import { runAcpServer } from "./acp/agent.js";
+import {
+  detectBootCrashLoop,
+  writeBootMarker,
+} from "./engine/crash-handler.js";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -195,6 +199,14 @@ async function runSessionPicker(): Promise<string | null> {
  * Full boot sequence: Splash → auth (if needed) → Welcome → REPL.
  */
 async function boot(opts: { baseUrl?: string; dir?: string; resumeId?: string } = {}): Promise<void> {
+  const safeMode = detectBootCrashLoop();
+  if (safeMode) {
+    process.stderr.write(
+      "\x1b[33mWarning: previous run crashed during startup — starting in safe mode " +
+      "(plugins and MCP disabled).\x1b[0m\n",
+    );
+  }
+
   // ── Session picker (runs before TUI when `klaatcode -r` with no ID) ───────
   if (opts.resumeId === "pick") {
     const picked = await runSessionPicker();
@@ -331,7 +343,12 @@ async function boot(opts: { baseUrl?: string; dir?: string; resumeId?: string } 
   };
 
   const client = new KlaatAIClient({ apiKey, baseUrl, onAuthExpired });
-  const sessionResult = await runREPL(app, client, { ...config, baseUrl }, projectRoot, { theme, resumeId: opts.resumeId });
+  writeBootMarker();
+  const sessionResult = await runREPL(app, client, { ...config, baseUrl }, projectRoot, {
+    theme,
+    resumeId: opts.resumeId,
+    safeMode,
+  });
 
   // REPL finished — clean up
   app.quit();
@@ -344,7 +361,7 @@ async function boot(opts: { baseUrl?: string; dir?: string; resumeId?: string } 
     const cyan = "\x1b[36m";
     const reset = "\x1b[0m";
     process.stdout.write(`\n${dim}Session saved. Resume with:${reset}\n`);
-    process.stdout.write(`  ${bold}${cyan}klaatcode --resume ${sessionResult.sessionId}${reset}\n\n`);
+    process.stdout.write(`  ${bold}${cyan}klaatai --resume ${sessionResult.sessionId}${reset}\n\n`);
   }
 }
 
