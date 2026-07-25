@@ -35,6 +35,10 @@ import {
   enableBracketedPaste, disableBracketedPaste,
 } from "../engine/index.js";
 import {
+  installCrashHandler,
+  clearBootMarker,
+} from "../engine/crash-handler.js";
+import {
   KlaatAIClient,
   type Message,
   type ContentPart,
@@ -247,8 +251,15 @@ export async function runREPL(
   client:      KlaatAIClient,
   config:      Config,
   projectRoot: string,
-  opts:        { theme?: Theme; resumeId?: string } = {},
+  opts:        { theme?: Theme; resumeId?: string; safeMode?: boolean } = {},
 ): Promise<{ sessionId: string }> {
+
+  let sessionId = "";
+  let sessionFile = "";
+  installCrashHandler({
+    getSessionId: () => sessionId || undefined,
+    getSessionFile: () => sessionFile || undefined,
+  });
 
   // ─── Widgets ──────────────────────────────────────────────────────────────
   const field   = new InputField();
@@ -555,21 +566,26 @@ export async function runREPL(
     chatLinesDirty = true;
     app.requestRender();
   });
-  const mcpConfig = loadMCPConfig(projectRoot, {
-    importMcpConfigs: config.compat?.importMcpConfigs !== false,
-    onLog: (msg: string) => { process.stderr.write(msg + "\n"); },
-  });
-  if (Object.keys(mcpConfig.servers).length > 0) {
-    mcpManager.connect(mcpConfig);
+  const safeMode = opts.safeMode === true;
+  if (!safeMode) {
+    const mcpConfig = loadMCPConfig(projectRoot, {
+      importMcpConfigs: config.compat?.importMcpConfigs !== false,
+      onLog: (msg: string) => { process.stderr.write(msg + "\n"); },
+    });
+    if (Object.keys(mcpConfig.servers).length > 0) {
+      mcpManager.connect(mcpConfig);
+    }
   }
 
   // ─── Plugins (user tools from ~/.klaatai/plugins + .klaatai/tools) ────────
   const pluginRegistry = new PluginRegistry();
-  void pluginRegistry.load(projectRoot).then(() => {
-    if (pluginRegistry.plugins.length > 0 || pluginRegistry.errors.length > 0) {
-      app.requestRender();
-    }
-  });
+  if (!safeMode) {
+    void pluginRegistry.load(projectRoot).then(() => {
+      if (pluginRegistry.plugins.length > 0 || pluginRegistry.errors.length > 0) {
+        app.requestRender();
+      }
+    });
+  }
 
   // ─── Lifetime usage fetch ─────────────────────────────────────────────────
 
@@ -850,8 +866,8 @@ export async function runREPL(
 
   const _sessionTs  = new Date().toISOString().slice(0, 19).replace(/:/g, "-");
   const _sessionRnd = Math.random().toString(36).slice(2, 6);
-  const sessionId   = `${_sessionTs}-${_sessionRnd}`;
-  const sessionFile = join(SESSION_DIR, `${sessionId}.jsonl`);
+  sessionId   = `${_sessionTs}-${_sessionRnd}`;
+  sessionFile = join(SESSION_DIR, `${sessionId}.jsonl`);
   const ledger      = new SessionLedger(join(SESSION_DIR, `${sessionId}.ledger.md`));
 
   function appendSessionMsg(msg: ChatMessage): void {
@@ -5487,6 +5503,15 @@ export async function runREPL(
 
   // Switch the app's render function to our full-screen REPL
   app.setRenderFn(render);
+  clearBootMarker();
+
+  if (safeMode) {
+    pushSystemMsg(
+      "Safe mode: previous startup crashed — plugins and MCP servers were skipped. " +
+      "Fix the underlying issue, then restart normally.",
+      "error",
+    );
+  }
 
   // Auto-resume if --resume flag was passed (ID resolved by pre-boot picker or directly)
   if (opts.resumeId) {
