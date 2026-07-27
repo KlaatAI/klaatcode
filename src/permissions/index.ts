@@ -20,7 +20,13 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { type ToolCall } from "../api/client.js";
+import { type CompiledRules, checkImportedRules } from "./claude-settings.js";
 
+export {
+  type CompiledRules,
+  loadClaudeCompatRules,
+  summarizeCompatRules,
+} from "./claude-settings.js";
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const KLAATAI_DIR = join(homedir(), ".klaatai");
@@ -148,7 +154,11 @@ function matchesPattern(subject: string, pattern: string): boolean {
  *   "deny"  — reject silently with an error message
  *   "ask"   — show the PermissionPrompt to the user
  */
-export function checkPermission(tc: ToolCall, perms: PermissionsFile): PermCheckResult {
+export function checkPermission(
+  tc: ToolCall,
+  perms: PermissionsFile,
+  importedRules?: CompiledRules | null,
+): PermCheckResult {
   const tool = tc.function.name;
 
   // Tier 1: always-safe tools
@@ -170,7 +180,15 @@ export function checkPermission(tc: ToolCall, perms: PermissionsFile): PermCheck
     for (const pattern of perms.allowed_commands) {
       if (matchesPattern(cmd, pattern)) return "allow";
     }
-    return "ask";
+    // Native config has no opinion — fall through to imported rules below.
+  }
+
+  // Compat: .claude/settings.json permissions.allow/deny/ask. Our native
+  // config (tiers 1-3 above) always outranks this — it's only consulted
+  // when the native model would otherwise ask.
+  if (importedRules) {
+    const imported = checkImportedRules(tc, importedRules);
+    if (imported) return imported;
   }
 
   // write_file / edit_file — not permanently trusted, ask

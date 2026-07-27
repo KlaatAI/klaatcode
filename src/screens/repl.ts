@@ -94,7 +94,10 @@ import {
   loadPermissions,
   persistAlwaysAllow,
   SAFE_TOOLS,
+  loadClaudeCompatRules,
+  summarizeCompatRules,
   type PermDecision,
+  type CompiledRules,
 } from "../permissions/index.js";
 import { exec, spawnSync } from "child_process";
 import { appendFileSync, readFileSync, writeFileSync, unlinkSync, readdirSync, existsSync, mkdirSync } from "node:fs";
@@ -555,12 +558,22 @@ export async function runREPL(
     chatLinesDirty = true;
     app.requestRender();
   });
+  
   const mcpConfig = loadMCPConfig(projectRoot, {
     importMcpConfigs: config.compat?.importMcpConfigs !== false,
     onLog: (msg: string) => { process.stderr.write(msg + "\n"); },
   });
   if (Object.keys(mcpConfig.servers).length > 0) {
     mcpManager.connect(mcpConfig);
+  }
+
+  // Compiled once per session — .claude/settings.json rarely changes mid-session,
+  // and this keeps the hot tool-call path free of extra fs reads.
+  let claudeCompatRules: CompiledRules | null = null;
+  if (config.compat?.importClaudeSettings !== false) {
+    claudeCompatRules = loadClaudeCompatRules(projectRoot);
+    const summary = summarizeCompatRules(claudeCompatRules);
+    if (summary) pushSystemMsg(summary);
   }
 
   // ─── Plugins (user tools from ~/.klaatai/plugins + .klaatai/tools) ────────
@@ -1492,7 +1505,7 @@ export async function runREPL(
     }
 
     const perms = loadPermissions();
-    const check = checkPermission(tc, perms);
+    const check = checkPermission(tc, perms, claudeCompatRules);
     if (check === "allow") {
       const result = await runTool();
       runHooks("after_tool", { KLAATAI_TOOL_NAME: tool, KLAATAI_TOOL_RESULT: result });
