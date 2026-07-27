@@ -315,15 +315,17 @@ Run shell commands on agent lifecycle events. Hooks receive a JSON payload on st
 ```json
 // .klaatai/hooks.json
 {
+  "session_start": ["echo \"session $KLAATAI_SESSION_ID started\" >> /tmp/klaatai.log"],
   "after_message": ["afplay /System/Library/Sounds/Glass.aiff"],
   "before_tool": [
     { "matcher": "run_command", "command": "./scripts/guard-shell.sh" }
   ],
-  "after_tool":     ["notify-send \"$KLAATAI_TOOL_NAME done\""]
+  "after_tool":     ["notify-send \"$KLAATAI_TOOL_NAME done\""],
+  "session_end":   ["echo \"session ended\" >> /tmp/klaatai.log"]
 }
 ```
 
-Events: `before_message` · `after_message` · `before_tool` · `after_tool`
+Events: `session_start` · `session_end` · `before_message` · `after_message` · `before_tool` · `after_tool`
 
 ### Project Rules
 
