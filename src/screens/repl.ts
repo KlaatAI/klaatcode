@@ -69,7 +69,6 @@ import { MCPManager, loadMCPConfig, type MCPServerConfig } from "../mcp/client.j
 import { seedSystemMessages, MODE_PROMPTS } from "../agent/system-prompt.js";
 import { checkForUpdate } from "../utils/update.js";
 import { readClipboardImage, MAX_IMAGE_BYTES } from "../utils/clipboard-image.js";
-import { copyToClipboard } from "../utils/clipboard.js";
 import { SessionLedger } from "../agent/session-ledger.js";
 import { COMPACTION_PROMPT, extractSummary, MAX_CONSECUTIVE_COMPACT_FAILURES } from "../agent/compaction-prompt.js";
 import { compactMessagesForApi } from "../agent/compaction.js";
@@ -79,6 +78,7 @@ import {
   renderSessionMarkdown,
   resolveExportPath,
 } from "./export-session.js";
+import { createSessionLifecycle } from "./session-lifecycle.js";
 import {
   TIER_COSTS, VALID_TIERS, TIER_CONTEXT_WINDOW,
   COMPACT_TRIGGER_RATIO,
@@ -558,11 +558,7 @@ export async function runREPL(
     chatLinesDirty = true;
     app.requestRender();
   });
-  
-  const mcpConfig = loadMCPConfig(projectRoot, {
-    importMcpConfigs: config.compat?.importMcpConfigs !== false,
-    onLog: (msg: string) => { process.stderr.write(msg + "\n"); },
-  });
+  const mcpConfig = loadMCPConfig(projectRoot);
   if (Object.keys(mcpConfig.servers).length > 0) {
     mcpManager.connect(mcpConfig);
   }
@@ -978,6 +974,21 @@ export async function runREPL(
 
   // ─── Clipboard helpers ────────────────────────────────────────────────────
 
+  /** Write text to the system clipboard cross-platform. Returns true on success. */
+  function copyToClipboard(text: string): boolean {
+    try {
+      if (process.platform === "darwin") {
+        spawnSync("pbcopy", [], { input: text, encoding: "utf-8" });
+      } else if (process.platform === "win32") {
+        spawnSync("clip", [], { input: text, encoding: "utf-8", shell: true });
+      } else {
+        const r = spawnSync("xclip", ["-selection", "clipboard"], { input: text, encoding: "utf-8" });
+        if (r.error) spawnSync("xsel", ["--clipboard", "--input"], { input: text, encoding: "utf-8" });
+      }
+      return true;
+    } catch { return false; }
+  }
+
   /** Convert StyledLine[] to plain text (strip all styling). */
   function styledLinesToText(lines: StyledLine[]): string {
     return lines.map(line => line.map(s => s.text).join("")).join("\n");
@@ -1300,7 +1311,7 @@ export async function runREPL(
   // STDIN and, for before_tool, can BLOCK the call: exit code 2 (stderr =
   // reason) or stdout {"decision":"block","reason":"…"}.
 
-  type HookEvent = "before_tool" | "after_tool" | "before_message" | "after_message";
+  type HookEvent = "before_tool" | "after_tool" | "before_message" | "after_message" | "session_start" | "session_end";
   type HookEntry = string | { command: string; matcher?: string; timeout?: number };
   type HooksConfig = Partial<Record<HookEvent, HookEntry[]>>;
 
@@ -2046,7 +2057,7 @@ export async function runREPL(
           "  /review [ref]     — AI code review of current diff (default: git diff HEAD)",
           "  /commit           — generate a git commit message with AI and confirm before committing",
           "  /skill [name]     — invoke a saved prompt skill; /skill list; /skill new <name>",
-          "  /hooks            — list configured lifecycle hooks (before/after tool & message)",
+          "  /hooks            — list configured lifecycle hooks (session/message/tool)",
           "  /why              — explain last routing decision",
           "  /tier [name]      — lock a Klaatu routing tier (nano/fast/code/reason/heavy); no arg = picker; /tier smart = auto",
           "  /model            — pick the model: Klaatu or a custom third-party API",
@@ -2621,10 +2632,8 @@ export async function runREPL(
               pushSystemMsg("Usage: `/mcp disable <server-name>`", "error");
               return true;
             }
-            const runtime = mcpManager.servers.find(s => s.name === serverName);
-            const fromHome = !runtime?.source || runtime.source === "~/.klaatai/mcp.json";
             const mcpConfigPath2 = join(homedir(), ".klaatai", "mcp.json");
-            if (fromHome && existsSync(mcpConfigPath2)) {
+            if (existsSync(mcpConfigPath2)) {
               try {
                 const cfg = JSON.parse(readFileSync(mcpConfigPath2, "utf-8")) as { servers?: Record<string, unknown> };
                 if (cfg.servers && serverName in cfg.servers) {
@@ -2632,22 +2641,10 @@ export async function runREPL(
                   writeFileSync(mcpConfigPath2, JSON.stringify(cfg, null, 2), "utf-8");
                   mcpManager.disconnectOne(serverName);
                   pushSystemMsg(`Server **${serverName}** disabled and removed from \`~/.klaatai/mcp.json\`.`);
-                } else if (runtime?.source) {
-                  mcpManager.disconnectOne(serverName);
-                  pushSystemMsg(
-                    `Server **${serverName}** disconnected for this session.\n\n` +
-                    `It is loaded from \`${runtime.source}\` — edit that file to remove it permanently.`,
-                  );
                 } else {
                   pushSystemMsg(`No server named "${serverName}" found in config.`, "error");
                 }
               } catch { pushSystemMsg("Failed to update mcp.json.", "error"); }
-            } else if (runtime?.source) {
-              mcpManager.disconnectOne(serverName);
-              pushSystemMsg(
-                `Server **${serverName}** disconnected for this session.\n\n` +
-                `It is loaded from \`${runtime.source}\` — edit that file to remove it permanently.`,
-              );
             } else {
               pushSystemMsg("No mcp.json config found.", "error");
             }
@@ -2669,8 +2666,7 @@ export async function runREPL(
               const icon = s.status === "connected" ? "●" : s.status === "error" ? "✗" : "○";
               const toolList = s.tools.slice(0, 5).map(t => `\`${t.name}\``).join(", ");
               const more = s.tools.length > 5 ? ` + ${s.tools.length - 5} more` : "";
-              const sourceHint = s.source ? ` *(from ${s.source})*` : "";
-              return `${icon} **${s.name}**${sourceHint} — ${s.status}: ${s.statusMessage}${s.status === "connected" ? `\n  Tools: ${toolList}${more}` : ""}`;
+              return `${icon} **${s.name}** — ${s.status}: ${s.statusMessage}${s.status === "connected" ? `\n  Tools: ${toolList}${more}` : ""}`;
             });
             pushSystemMsg(`**MCP Servers** (${servers.length}):\n\n${lines.join("\n\n")}\n\n\`/mcp enable <preset>\` to add more`);
           }
@@ -2967,18 +2963,23 @@ export async function runREPL(
         // ── /hooks — list configured hooks ───────────────────────────────
         if (slash === "/hooks") {
           const hooks = loadHooks();
-          const events: HookEvent[] = ["before_message", "after_message", "before_tool", "after_tool"];
+          const events: HookEvent[] = [
+            "session_start", "session_end",
+            "before_message", "after_message", "before_tool", "after_tool",
+          ];
           const hasAny = events.some(e => (hooks[e]?.length ?? 0) > 0);
           if (!hasAny) {
             pushSystemMsg(
               "No hooks configured.\n\n" +
               "Create `.klaatai/hooks.json` or `~/.klaatai/hooks.json`:\n\n" +
               "```json\n{\n" +
+              '  "session_start": ["echo \\"session $KLAATAI_SESSION_ID started\\" >> /tmp/klaatai.log"],\n' +
               '  "after_message": ["afplay /System/Library/Sounds/Glass.aiff"],\n' +
               '  "before_tool":   ["echo \\"Tool: $KLAATAI_TOOL_NAME\\" >> /tmp/klaatai.log"],\n' +
-              '  "after_tool":    ["echo \\"Done: $KLAATAI_TOOL_NAME\\" >> /tmp/klaatai.log"]\n' +
+              '  "after_tool":    ["echo \\"Done: $KLAATAI_TOOL_NAME\\" >> /tmp/klaatai.log"],\n' +
+              '  "session_end":   ["echo \\"session ended\\" >> /tmp/klaatai.log"]\n' +
               "}\n```\n\n" +
-              "**Events:** `before_message` · `after_message` · `before_tool` · `after_tool`\n" +
+              "**Events:** `session_start` · `session_end` · `before_message` · `after_message` · `before_tool` · `after_tool`\n" +
               "**Env vars:** `KLAATAI_EVENT` · `KLAATAI_TOOL_NAME` · `KLAATAI_TOOL_ARGS` · `KLAATAI_PROJECT_ROOT` · `KLAATAI_SESSION_ID`",
             );
           } else {
@@ -4712,9 +4713,16 @@ export async function runREPL(
   let _quitting = false;
   let _resolveQuit: (() => void) | null = null;
 
+  // Guards session_start / session_end so multiple quit triggers
+  // (/exit, Ctrl+D, Ctrl+C) cannot double-fire session_end.
+  const sessionLife = createSessionLifecycle((event) => {
+    runHooks(event);
+  });
+
   function quit(): void {
     if (_quitting) return;
     _quitting = true;
+    sessionLife.end();
     clearInterval(tipTimer);
     for (const u of unsubscribers) u();
     mcpManager.disconnectAll();
@@ -5518,6 +5526,9 @@ export async function runREPL(
       pushSystemMsg(`No session matching "${opts.resumeId}". Starting fresh.`, "error");
     }
   }
+
+  // Fire once after boot (config/auth/MCP loaded) and before the first prompt.
+  sessionLife.start();
 
   // Wait until quit() is called
   await new Promise<void>((resolve) => {
