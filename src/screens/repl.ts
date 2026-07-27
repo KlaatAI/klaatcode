@@ -69,7 +69,6 @@ import { MCPManager, loadMCPConfig, type MCPServerConfig } from "../mcp/client.j
 import { seedSystemMessages, MODE_PROMPTS } from "../agent/system-prompt.js";
 import { checkForUpdate } from "../utils/update.js";
 import { readClipboardImage, MAX_IMAGE_BYTES } from "../utils/clipboard-image.js";
-import { copyToClipboard } from "../utils/clipboard.js";
 import { SessionLedger } from "../agent/session-ledger.js";
 import { COMPACTION_PROMPT, extractSummary, MAX_CONSECUTIVE_COMPACT_FAILURES } from "../agent/compaction-prompt.js";
 import { compactMessagesForApi } from "../agent/compaction.js";
@@ -555,10 +554,7 @@ export async function runREPL(
     chatLinesDirty = true;
     app.requestRender();
   });
-  const mcpConfig = loadMCPConfig(projectRoot, {
-    importMcpConfigs: config.compat?.importMcpConfigs !== false,
-    onLog: (msg: string) => { process.stderr.write(msg + "\n"); },
-  });
+  const mcpConfig = loadMCPConfig(projectRoot);
   if (Object.keys(mcpConfig.servers).length > 0) {
     mcpManager.connect(mcpConfig);
   }
@@ -964,6 +960,21 @@ export async function runREPL(
   let inputSelecting = false;
 
   // ─── Clipboard helpers ────────────────────────────────────────────────────
+
+  /** Write text to the system clipboard cross-platform. Returns true on success. */
+  function copyToClipboard(text: string): boolean {
+    try {
+      if (process.platform === "darwin") {
+        spawnSync("pbcopy", [], { input: text, encoding: "utf-8" });
+      } else if (process.platform === "win32") {
+        spawnSync("clip", [], { input: text, encoding: "utf-8", shell: true });
+      } else {
+        const r = spawnSync("xclip", ["-selection", "clipboard"], { input: text, encoding: "utf-8" });
+        if (r.error) spawnSync("xsel", ["--clipboard", "--input"], { input: text, encoding: "utf-8" });
+      }
+      return true;
+    } catch { return false; }
+  }
 
   /** Convert StyledLine[] to plain text (strip all styling). */
   function styledLinesToText(lines: StyledLine[]): string {
@@ -2608,10 +2619,8 @@ export async function runREPL(
               pushSystemMsg("Usage: `/mcp disable <server-name>`", "error");
               return true;
             }
-            const runtime = mcpManager.servers.find(s => s.name === serverName);
-            const fromHome = !runtime?.source || runtime.source === "~/.klaatai/mcp.json";
             const mcpConfigPath2 = join(homedir(), ".klaatai", "mcp.json");
-            if (fromHome && existsSync(mcpConfigPath2)) {
+            if (existsSync(mcpConfigPath2)) {
               try {
                 const cfg = JSON.parse(readFileSync(mcpConfigPath2, "utf-8")) as { servers?: Record<string, unknown> };
                 if (cfg.servers && serverName in cfg.servers) {
@@ -2619,22 +2628,10 @@ export async function runREPL(
                   writeFileSync(mcpConfigPath2, JSON.stringify(cfg, null, 2), "utf-8");
                   mcpManager.disconnectOne(serverName);
                   pushSystemMsg(`Server **${serverName}** disabled and removed from \`~/.klaatai/mcp.json\`.`);
-                } else if (runtime?.source) {
-                  mcpManager.disconnectOne(serverName);
-                  pushSystemMsg(
-                    `Server **${serverName}** disconnected for this session.\n\n` +
-                    `It is loaded from \`${runtime.source}\` — edit that file to remove it permanently.`,
-                  );
                 } else {
                   pushSystemMsg(`No server named "${serverName}" found in config.`, "error");
                 }
               } catch { pushSystemMsg("Failed to update mcp.json.", "error"); }
-            } else if (runtime?.source) {
-              mcpManager.disconnectOne(serverName);
-              pushSystemMsg(
-                `Server **${serverName}** disconnected for this session.\n\n` +
-                `It is loaded from \`${runtime.source}\` — edit that file to remove it permanently.`,
-              );
             } else {
               pushSystemMsg("No mcp.json config found.", "error");
             }
@@ -2656,8 +2653,7 @@ export async function runREPL(
               const icon = s.status === "connected" ? "●" : s.status === "error" ? "✗" : "○";
               const toolList = s.tools.slice(0, 5).map(t => `\`${t.name}\``).join(", ");
               const more = s.tools.length > 5 ? ` + ${s.tools.length - 5} more` : "";
-              const sourceHint = s.source ? ` *(from ${s.source})*` : "";
-              return `${icon} **${s.name}**${sourceHint} — ${s.status}: ${s.statusMessage}${s.status === "connected" ? `\n  Tools: ${toolList}${more}` : ""}`;
+              return `${icon} **${s.name}** — ${s.status}: ${s.statusMessage}${s.status === "connected" ? `\n  Tools: ${toolList}${more}` : ""}`;
             });
             pushSystemMsg(`**MCP Servers** (${servers.length}):\n\n${lines.join("\n\n")}\n\n\`/mcp enable <preset>\` to add more`);
           }
