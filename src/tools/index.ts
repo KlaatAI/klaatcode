@@ -23,6 +23,7 @@ import { join, resolve, dirname, relative } from "node:path";
 import { homedir } from "node:os";
 import { execSync, spawnSync } from "node:child_process";
 import { type ToolCall, type ToolDefinition, type KlaatAIClient } from "../api/client.js";
+import { VALID_TIERS, EXPLICIT_ONLY_TIERS } from "../screens/tiers.js";
 import { replaceInContent, type ReplaceResult } from "./edit-engine.js";
 import { recordFileRead, checkMutationAllowed } from "./file-state.js";
 import { runDiagnostics } from "./diagnostics.js";
@@ -975,6 +976,11 @@ export async function executeTools(tc: ToolCall, projectRoot: string, client?: K
 
 // ─── Tool Definitions (sent to model) ────────────────────────────────────────
 
+/** Tiers delegate_task may request, in ladder order — every valid tier except
+ * the explicit-only ones (see EXPLICIT_ONLY_TIERS). Derived so a new tier lands
+ * in the schema automatically, and byte-stable across turns (prompt cache). */
+const DELEGATABLE_TIERS: string[] = [...VALID_TIERS].filter(t => !EXPLICIT_ONLY_TIERS.has(t));
+
 export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     type: "function",
@@ -1393,7 +1399,10 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           },
           tier: {
             type: "string",
-            enum: ["nano", "fast", "code", "reason", "heavy"],
+            // Explicit-only tiers (titan) are deliberately absent: a sub-agent
+            // tier the model picks is not the user asking for titan by name,
+            // and one delegated turn can eat a whole day's titan cap.
+            enum: DELEGATABLE_TIERS,
             description: "Optional routing-tier override (each persona has a sensible default).",
           },
           background: {

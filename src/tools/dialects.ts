@@ -2,7 +2,7 @@
  * Toolset dialects — tier-aware tool schema selection.
  *
  * Klaatu routes every request to a different model tier; a fixed 27-tool
- * schema is wrong at the edges. Strong tiers (code/reason/heavy) handle the
+ * schema is wrong at the edges. Strong tiers (code/reason/heavy/titan) handle the
  * full set; the fast tier gets a trimmed core set (fewer schemas = fewer
  * prompt tokens, less tool-choice confusion on small models); nano also gets
  * the concise set (see dialectForTier for why never zero tools).

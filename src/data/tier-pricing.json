@@ -1,0 +1,58 @@
+{
+  "$schema": "Tier pricing, weights and premium caps — single source of truth for what a USER is charged and what a request costs against their pool.",
+  "$updated": "2026-07-29",
+  "$canonical": "tier-pricing.json at the monorepo ROOT. Edit only this file.",
+  "$mirrors": [
+    "KlaatAi.CLI/src/data/tier-pricing.json",
+    "KlaatAI.VSCode/src/data/tier-pricing.json"
+  ],
+  "$sync": "Mirrors are byte-identical GENERATED copies (each client bundles from its own root). After editing this file run: python3 scripts/sync_tier_pricing.py (use --check in CI). KlaatAI.Klaatu/tests/test_tier_pricing_contract.py asserts the gateway's _USER_COST_PER_MT / _UNIT_WEIGHTS_DEFAULT / cap tables match this file.",
+  "$note": "Model/provider COST lives in model-pricing.json. This file is the sell side. Do not put provider cost here — clients must never display what we pay upstream.",
+  "$units": "input/output are USD per 1 million tokens. weight is weighted request units consumed per user turn.",
+
+  "tiers": {
+    "nano":   { "input": 0.15, "output": 0.50, "weight": 0.25, "label": "Klaatu Nano",   "surface": "both" },
+    "fast":   { "input": 0.25, "output": 0.75, "weight": 0.5,  "label": "Klaatu Flash",  "surface": "editor" },
+    "code":   { "input": 0.80, "output": 2.50, "weight": 1.0,  "label": "Klaatu Core",   "surface": "both" },
+    "reason": { "input": 2.00, "output": 6.00, "weight": 3.0,  "label": "Klaatu Reason", "surface": "both" },
+    "heavy":  { "input": 2.50, "output": 8.00, "weight": 4.0,  "label": "Klaatu Ultra",  "surface": "editor" },
+    "titan":  { "input": 7.50, "output": 37.50, "weight": 15.0, "label": "Klaatu Titan", "surface": "editor",
+                "explicit_only": true,
+                "note": "Kimi K3 (2.5T). Never auto-routed — asked for by name or via the klaatu-titan alias." },
+
+    "flash":  { "input": 0.25, "output": 0.75, "weight": 0.5,  "label": "Klaatu Flash",  "surface": "web" },
+    "search": { "input": 0.25, "output": 0.75, "weight": 0.5,  "label": "Klaatu Search", "surface": "web" },
+    "core":   { "input": 0.60, "output": 2.00, "weight": 0.5,  "label": "Klaatu Core",   "surface": "web" },
+    "beast":  { "input": 2.50, "output": 8.00, "weight": 4.0,  "label": "Klaatu Beast",  "surface": "web" }
+  },
+
+  "premium_tiers": ["reason", "heavy", "titan"],
+
+  "plan_prices_usd_month": {
+    "free": 0, "starter": 5, "pro": 15, "scale": 32, "team": 30, "apex": 99, "enterprise": 0
+  },
+  "$planPriceNote": "Published monthly list price per seat. Lives here because the premium-cap budget is only meaningful against a price — the margin guard used to hardcode its own copy and drifted (it assumed Team $36 while we charge $30, so Team's ceilings were validated against revenue we don't collect). Must match Klaatu api/me_routes.py _PLAN_PRICE_USD and the subscription_plans table. Team is DELIBERATELY cheaper than Scale ($30 vs $32), so Team's caps must stay below Scale's.",
+
+  "plan_caps": {
+    "free":    { "daily": {}, "monthly": {} },
+    "starter": { "daily": { "code": 12, "titan": 1 }, "monthly": { "titan": 3 } },
+    "pro":     { "daily": { "code": 25, "reason": 25, "heavy": 10, "titan": 2 },
+                 "monthly": { "reason": 75, "heavy": 20, "titan": 8 } },
+    "scale":   { "daily": { "code": 50, "reason": 60, "heavy": 30, "titan": 4 },
+                 "monthly": { "reason": 175, "heavy": 50, "titan": 13 } },
+    "team":    { "daily": { "code": 45, "reason": 50, "heavy": 25, "titan": 4 },
+                 "monthly": { "reason": 165, "heavy": 45, "titan": 12 } },
+    "apex":    { "daily": { "code": 120, "reason": 150, "heavy": 80, "titan": 8 },
+                 "monthly": { "reason": 500, "heavy": 150, "titan": 48 } }
+  },
+
+  "demotion": {
+    "titan": "heavy",
+    "heavy": "reason",
+    "reason": "core",
+    "beast": "core"
+  },
+  "$demotionNote": "Edges the gateway enforces (api/quota.py _DEMOTION_MAP). `reason` demotes to the web `core` tier even for editor clients — a pre-existing quirk kept here so clients render what actually happens, not what would be tidier. `code` is never demoted: it has no enforced per-tier cap, the weighted pool governs it.",
+
+  "defaultTier": "code"
+}

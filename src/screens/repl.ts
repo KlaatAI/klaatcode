@@ -80,8 +80,8 @@ import {
 } from "./export-session.js";
 import { createSessionLifecycle } from "./session-lifecycle.js";
 import {
-  TIER_COSTS, VALID_TIERS, TIER_CONTEXT_WINDOW,
-  COMPACT_TRIGGER_RATIO,
+  TIER_COSTS, TIER_WEIGHTS, VALID_TIERS, TIER_CONTEXT_WINDOW,
+  COMPACT_TRIGGER_RATIO, costUsd, premiumCaps, tierLabel, monthlyResetLabel,
   TIER_COLOR_MAP, KLAATU_MODEL_MAP, formatTok, formatElapsed,
 } from "./tiers.js";
 import { getPersona, PERSONAS } from "../agent/personas.js";
@@ -131,8 +131,8 @@ interface ChatMessage {
   model?: string;
   tier?: string;
   elapsed?: number;
-  /** Tier-clamp note when the server overrode the hint: "heavy → code". */
-  clamp?: { from: string; to: string; why?: string };
+  /** Tier change the server made: plan entitlement ("plan") or a cap being hit ("cap"). */
+  clamp?: { from: string; to: string; why?: string; kind?: "plan" | "cap" };
   collapsed?: boolean;
   /** Display-only unified diff for edit/write tools (not sent to the model). */
   diff?: DiffLine[];
@@ -150,15 +150,35 @@ interface FileChange {
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 /**
- * Parse a tier clamp out of x_klaatai.reason. The server marks an overridden
- * hint as `hint_clamped:heavy->code(plan:free)` (E4 public protocol). Returns
- * null when the served tier matched the request (no clamp to show).
+ * Parse a tier change out of x_klaatai.reason. Two server markers:
+ *   `hint_clamped:heavy->code(plan:free)` — the tier you asked for isn't on your plan (D3)
+ *   `plan_enforced:heavy->reason`         — you hit that tier's daily/monthly cap
+ * Returns null when the served tier matched the request (nothing to explain).
  */
-function parseClamp(reason?: string): { from: string; to: string; why?: string } | null {
+function parseClamp(reason?: string): {
+  from: string; to: string; why?: string; kind: "plan" | "cap";
+} | null {
   if (!reason) return null;
-  const m = reason.match(/hint_clamped:(\w+)->(\w+)(?:\(([^)]*)\))?/);
-  if (!m || m[1] === m[2]) return null;
-  return { from: m[1]!, to: m[2]!, why: m[3] };
+  const clamp = reason.match(/hint_clamped:(\w+)->(\w+)(?:\(([^)]*)\))?/);
+  if (clamp && clamp[1] !== clamp[2]) {
+    return { from: clamp[1]!, to: clamp[2]!, why: clamp[3], kind: "plan" };
+  }
+  const cap = reason.match(/plan_enforced:(\w+)->(\w+)/);
+  if (cap && cap[1] !== cap[2]) {
+    return { from: cap[1]!, to: cap[2]!, kind: "cap" };
+  }
+  return null;
+}
+
+/** One-line explanation of a tier change — what was asked, what served, why, when it resets. */
+function describeClamp(c: { from: string; to: string; why?: string; kind: "plan" | "cap" }): string {
+  const from = tierLabel(c.from) || c.from;
+  const to = tierLabel(c.to) || c.to;
+  if (c.kind === "cap") {
+    return `${from} limit reached — served on ${to} instead. Limits reset ${monthlyResetLabel()} (daily ones at midnight UTC).`;
+  }
+  const why = c.why ? ` (${c.why})` : "";
+  return `${from} isn't available on your plan${why} — served on ${to}.`;
 }
 
 // Rotating status verbs — one step every 3s of elapsed time.
@@ -423,7 +443,9 @@ export async function runREPL(
     (config.toolDialects === "off" || client.customEndpoint)
       ? "full"
       : dialectForTier(tier ?? forceTier ?? lastTier);
-  let lastClamp:    { from: string; to: string; why?: string } | null = null;
+  let lastClamp:    { from: string; to: string; why?: string; kind: "plan" | "cap" } | null = null;
+  /** Last tier-change already announced, so a multi-round task explains it once. */
+  let lastClampNoticed: string | null = null;
   let lastQuota:    QuotaSnapshot | null = null;
   let totalRequests = 0;
   let filesExpanded = true;
@@ -770,6 +792,7 @@ export async function runREPL(
       { label: "Klaatu Core",          value: "code",   description: "Code-optimised",                       color: "#60a5fa" },
       { label: "Klaatu Reason",        value: "reason", description: "Advanced reasoning",                   color: "#c084fc" },
       { label: "Klaatu Ultra",         value: "heavy",  description: "Most powerful",                        color: "#f87171" },
+      { label: "Klaatu Titan",         value: "titan",  description: "Kimi K3 · frontier, paid plans, capped/day", color: "#fb923c" },
     ], (item) => {
       if (item.value === "smart") {
         forceTier = null;
@@ -1089,11 +1112,14 @@ export async function runREPL(
               headerParts.push(span("  ·  ", { fg: palette.mutedFg - 3 }));
               headerParts.push(span(formatElapsed(msg.elapsed), { fg: palette.mutedFg }));
             }
-            // Tier-clamp badge: server overrode the requested tier hint.
+            // Tier-change badge: the server served a different tier than was asked for,
+            // either because the plan doesn't include it or because a cap was reached.
             if (msg.clamp) {
+              const capHit = msg.clamp.kind === "cap";
               headerParts.push(span("  ", {}));
-              headerParts.push(span(`⤵ ${msg.clamp.from}→${msg.clamp.to}`, { fg: 222, bold: true }));
-              if (msg.clamp.why) headerParts.push(span(` (${msg.clamp.why})`, { fg: palette.mutedFg, italic: true }));
+              headerParts.push(span(`⤵ ${msg.clamp.from}→${msg.clamp.to}`, { fg: capHit ? 209 : 222, bold: true }));
+              const note = capHit ? " (limit reached)" : msg.clamp.why ? ` (${msg.clamp.why})` : "";
+              if (note) headerParts.push(span(note, { fg: palette.mutedFg, italic: true }));
             }
             lines.push(headerParts);
           }
@@ -1808,16 +1834,43 @@ export async function runREPL(
           const q = lastQuota;
           const parts: string[] = [];
           if (q.unitsUsed !== undefined) {
-            // Weighted request units (E1): heavy turns cost 5×, nano 0.25×.
+            // Weighted request units (E1). Weights come from the generated table:
+            // nano 0.25 · fast 0.5 · code 1 · reason 3 · heavy 4 · titan 10.
             const limit = q.unitsLimit !== undefined ? ` / ${q.unitsLimit}` : "";
-            parts.push(`  Units used: ${q.unitsUsed.toFixed(1)}${limit} (weighted)`);
+            const left = q.unitsLimit !== undefined
+              ? `  (${Math.max(0, q.unitsLimit - q.unitsUsed).toFixed(0)} left)` : "";
+            parts.push(`  Units used: ${q.unitsUsed.toFixed(1)}${limit} (weighted)${left}`);
           }
           if (q.requestsUsed !== undefined) {
             const limit = q.requestsLimit !== undefined ? ` / ${q.requestsLimit}` : "";
             parts.push(`  Requests:   ${q.requestsUsed}${limit}`);
           }
           if (q.plan) parts.push(`  Plan:       ${q.plan}`);
+          // What a turn costs against the pool, so a 10-unit titan turn is visible
+          // BEFORE it's spent rather than after the pool drains.
+          const costLine = ["code", "reason", "heavy", "titan"]
+            .filter(t => TIER_WEIGHTS[t] !== undefined)
+            .map(t => `${t} ${TIER_WEIGHTS[t]}×`)
+            .join(" · ");
+          if (costLine) parts.push(`  Per turn:   ${costLine}`);
           if (parts.length) quotaBlock = `\n\n**Daily quota:**\n${parts.join("\n")}`;
+
+          // Premium tiers have enforced per-day AND per-month ceilings; past them the
+          // gateway demotes (titan→heavy→reason) instead of failing. Show both so a
+          // demotion is never a surprise.
+          const caps = premiumCaps(q.plan);
+          if (caps.length) {
+            const rows = caps.map(c => {
+              const usedToday = tierCounts.get(c.tier) ?? 0;
+              const day = c.daily !== undefined ? `${c.daily}/day` : "—";
+              const mo = c.monthly !== undefined ? `${c.monthly}/mo` : "—";
+              return `  ${tierLabel(c.tier).padEnd(13)} ${day.padStart(8)} · ${mo.padStart(7)}` +
+                     `   (${usedToday} this session)`;
+            });
+            quotaBlock += `\n\n**Premium limits** (${q.plan ?? "plan"}, resets ${monthlyResetLabel()}):\n` +
+              rows.join("\n") +
+              `\n  Past a limit the tier steps down instead of failing.`;
+          }
         }
         // 9.4: burn rate + per-task attribution + budget cap status.
         const burn = burnRatePerMin();
@@ -1931,7 +1984,7 @@ export async function runREPL(
           );
         } else {
           pushSystemMsg(
-            `Unknown tier "${tier}".\nValid tiers: nano · fast · code · reason · heavy\n\nExample: /tier fast`,
+            `Unknown tier "${tier}".\nValid tiers: nano · fast · code · reason · heavy · titan\n\nExample: /tier fast`,
             "error"
           );
         }
@@ -2047,7 +2100,7 @@ export async function runREPL(
           "  /skill [name]     — invoke a saved prompt skill; /skill list; /skill new <name>",
           "  /hooks            — list configured lifecycle hooks (session/message/tool)",
           "  /why              — explain last routing decision",
-          "  /tier [name]      — lock a Klaatu routing tier (nano/fast/code/reason/heavy); no arg = picker; /tier smart = auto",
+          "  /tier [name]      — lock a Klaatu routing tier (nano/fast/code/reason/heavy/titan); no arg = picker; /tier smart = auto",
           "  /model            — pick the model: Klaatu or a custom third-party API",
           "  /model add <name> <base_url> <model_id> [env:VAR|key] — save a custom OpenAI-compatible model",
           "  /model remove <name> — delete a custom model",
@@ -3253,13 +3306,26 @@ export async function runREPL(
                 lastModel = chunk.metadata.model ?? "Auto";
                 lastTier  = chunk.metadata.tier ?? "smart";
                 lastClamp = parseClamp(chunk.metadata.reason);
+                // Explain a tier change once per transition. A silent downgrade reads as
+                // "the model got dumber"; naming the limit and its reset makes it a fact
+                // the user can plan around. Deduped so a multi-round task says it once.
+                if (lastClamp) {
+                  const clampKey = `${lastClamp.kind}:${lastClamp.from}->${lastClamp.to}`;
+                  if (clampKey !== lastClampNoticed) {
+                    lastClampNoticed = clampKey;
+                    pushSystemMsg(describeClamp(lastClamp));
+                  }
+                } else {
+                  lastClampNoticed = null;
+                }
                 // Scale the explore budget to the served tier's window — a big
                 // window (reason 118K) legitimately explores far past the old
                 // fixed 60K before it's "stuck". Router escalation can change
                 // the tier mid-task, so re-scale on every response.
                 phaseTracker.scaleForWindow(getContextWindow());
-                const [inp, out] = TIER_COSTS[chunk.metadata.tier] ?? [0.5, 1.5];
-                const turnCost = (chunk.usage.prompt_tokens * inp + chunk.usage.completion_tokens * out) / 1_000_000;
+                const turnCost = costUsd(
+                  chunk.usage.prompt_tokens, chunk.usage.completion_tokens, chunk.metadata.tier,
+                );
                 sessionCost += turnCost;
                 recordTurnCost(turnCost);
                 totalTokens = {
@@ -4532,17 +4598,21 @@ export async function runREPL(
           ]);
           sRow++;
         }
-        // Estimated savings vs always-heavy
-        const HEAVY = TIER_COSTS["heavy"] ?? [2.50, 8.00];
+        // What smart routing saved vs running every turn on the top tier. Baseline is
+        // named on the label so the number is checkable — an unattributed "saved $X" is
+        // marketing, not information. Rates come from the generated table (both this and
+        // the per-tier rates used to be read from a stale hand-typed copy).
+        const BASELINE_TIER = "titan";
+        const BASE = TIER_COSTS[BASELINE_TIER] ?? TIER_COSTS["heavy"];
         let savings = 0;
         const avgPrompt = totalTokens.prompt   / Math.max(1, totalRequests);
         const avgCompl  = totalTokens.completion / Math.max(1, totalRequests);
         for (const [tier, count] of tierCounts.entries()) {
-          const [inp, out] = TIER_COSTS[tier] ?? [0.5, 1.5];
-          savings += count * (avgPrompt * (HEAVY[0] - inp) + avgCompl * (HEAVY[1] - out)) / 1_000_000;
+          const [inp, out] = TIER_COSTS[tier] ?? TIER_COSTS["code"];
+          savings += count * (avgPrompt * (BASE[0] - inp) + avgCompl * (BASE[1] - out)) / 1_000_000;
         }
         if (savings > 0.0001) {
-          sbKV("Saved vs heavy", [span(`$${savings.toFixed(4)}`, { fg: 114, bold: true })]);
+          sbKV(`Saved vs ${BASELINE_TIER}`, [span(`$${savings.toFixed(4)}`, { fg: 114, bold: true })]);
         }
       }
       sbBlank();

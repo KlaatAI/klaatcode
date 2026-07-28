@@ -119,7 +119,7 @@ _klaatai() {
         run)
           _arguments \\
             '--base-url[API base URL override]:url:' \\
-            '--model[Force routing tier]:tier:(nano fast code reason heavy)' \\
+            '--model[Force routing tier]:tier:(nano fast code reason heavy titan)' \\
             '--system[Prepend a system message]:text:' \\
             '--max-cost[Abort at this USD cost]:usd:' \\
             '(-h --help)'{-h,--help}'[Show help]' \\

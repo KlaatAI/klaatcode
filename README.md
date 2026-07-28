@@ -43,7 +43,7 @@ klaatcode
 
 ## What is Klaatu?
 
-**Klaatu** is the routing brain — a hosted service, not something that runs on your machine. Every message you send from Klaat Code goes to Klaatu, which classifies it and routes it through one of five cost tiers (`nano → fast → code → reason → heavy`), escalating automatically when a task turns out harder than it looked, and never charging you frontier prices for a trivial turn. Tool calls inside a single request — reads, edits, shell commands, searches — are free; only your messages count against quota. This is also the architectural reason Klaat Code can be open source without giving away the thing that makes it good: **the client is a thin terminal to a service**, the same relationship `gh` has to GitHub. The intelligence — routing decisions, model health tracking, pricing, the code-graph index — lives server-side, at [klaatai.com](https://klaatai.com).
+**Klaatu** is the routing brain — a hosted service, not something that runs on your machine. Every message you send from Klaat Code goes to Klaatu, which classifies it and routes it through one of five cost tiers (`nano → fast → code → reason → heavy`, plus the opt-in `titan`), escalating automatically when a task turns out harder than it looked, and never charging you frontier prices for a trivial turn. Tool calls inside a single request — reads, edits, shell commands, searches — are free; only your messages count against quota. This is also the architectural reason Klaat Code can be open source without giving away the thing that makes it good: **the client is a thin terminal to a service**, the same relationship `gh` has to GitHub. The intelligence — routing decisions, model health tracking, pricing, the code-graph index — lives server-side, at [klaatai.com](https://klaatai.com).
 
 ## What is Klaat Code, and how is it different?
 
@@ -147,7 +147,7 @@ klaatcode whoami                    # check auth
 
 ### Smart Model Routing
 
-Each request is classified and routed to one of five tiers by Klaatu. You see which tier answered (badge in the header) and why.
+Each request is classified and routed to one of five auto-routed tiers by Klaatu (a sixth, `titan`, is opt-in only). You see which tier answered (badge in the header) and why.
 
 ```
 /tier           # lock a tier, or open the picker
@@ -164,8 +164,9 @@ Each request is classified and routed to one of five tiers by Klaatu. You see wh
 | `code` | Default — most coding work |
 | `reason` | Debugging, architecture, tricky logic |
 | `heavy` | Large refactors, hardest problems |
+| `titan` | Kimi K3 (2.5T) — frontier power, **never auto-routed**: ask for it with `/tier titan`. Pro and above, capped per day (Starter only during a promo window). |
 
-The router escalates automatically when a task turns out harder than it looked and de-escalates when you don't need the big guns. Tool rounds, retries, and failovers are never billed — one user message = one request.
+The router escalates automatically when a task turns out harder than it looked and de-escalates when you don't need the big guns. `titan` sits outside that ladder — the router will never escalate you into it, and it de-escalates to `heavy` when your daily cap is spent. Tool rounds, retries, and failovers are never billed — one user message = one request.
 
 **Bring your own model.** Don't want Klaatu for a task? Add any OpenAI-compatible endpoint and switch to it per-session:
 ```

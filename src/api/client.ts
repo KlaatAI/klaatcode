@@ -9,6 +9,8 @@
  *   - x_klaatai metadata (tier, model, cost)
  */
 
+import { costUsd } from "../pricing";
+
 export interface Message {
   role: "system" | "user" | "assistant" | "tool";
   content: string | ContentPart[];
@@ -168,6 +170,10 @@ const TIER_MODEL_ALIAS: Record<string, string> = {
   code:   "klaatu-code",
   reason: "klaatu-reason",
   heavy:  "klaatu-heavy",
+  // titan (Kimi K3) is explicit-request only server-side; the alias IS the
+  // explicit request, so /tier titan reaches it (Klaatu server.py
+  // _OAI_MODEL_ROUTING["klaatu-titan"]).
+  titan:  "klaatu-titan",
 };
 
 /** Client-observed model-quality feedback (X-KlaatAI-Model-Feedback, E3). */
@@ -510,7 +516,7 @@ export class KlaatAIClient {
       tools?: ToolDefinition[];
       maxTokens?: number;
       temperature?: number;
-      /** Force a specific routing tier (nano/fast/code/reason/heavy). */
+      /** Force a specific routing tier (nano/fast/code/reason/heavy/titan). */
       tier?: string;
       /** Task-shape hint (D4): plan|edit|search|summarize. */
       task?: "plan" | "edit" | "search" | "summarize";
@@ -712,19 +718,9 @@ export class KlaatAIClient {
   /** Estimate USD cost from metadata (client-side display only). */
   static formatCost(metadata?: KlaatAIMetadata, usage?: { prompt_tokens: number; completion_tokens: number }): string {
     if (!metadata || !usage) return "";
-    // Simple tier-based estimate matching server _USER_COST_PER_MT
-    const tierCosts: Record<string, [number, number]> = {
-      nano:   [0.10, 0.20],
-      fast:   [0.25, 0.75],
-      code:   [0.50, 1.50],
-      reason: [1.00, 3.00],
-      heavy:  [2.50, 8.00],
-      flash:  [0.25, 0.75],
-      core:   [0.60, 2.00],
-      beast:  [2.50, 8.00],
-    };
-    const [inp, out] = tierCosts[metadata.tier] ?? [0.5, 1.5];
-    const cost = (usage.prompt_tokens * inp + usage.completion_tokens * out) / 1_000_000;
+    // Rates come from the generated tier-pricing table — the same numbers the gateway
+    // bills. The inline copy that used to live here understated nano/code/reason.
+    const cost = costUsd(usage.prompt_tokens, usage.completion_tokens, metadata.tier);
     return cost < 0.001 ? "<$0.001" : `$${cost.toFixed(4)}`;
   }
 }

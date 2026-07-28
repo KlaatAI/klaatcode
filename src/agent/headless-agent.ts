@@ -13,6 +13,7 @@
 import { KlaatAIClient, type Message, type ToolCall, type ToolDefinition } from "../api/client.js";
 import { executeTools, TOOL_DEFINITIONS } from "../tools/index.js";
 import { compactMessagesForApi } from "./compaction.js";
+import { costUsd } from "../pricing.js";
 
 export interface HeadlessResult {
   finalText: string;
@@ -49,11 +50,9 @@ export interface HeadlessOptions {
   onProgress?: (ev: { kind: "token" | "tool" | "turn"; detail?: string }) => void;
 }
 
-const TIER_COST: Record<string, [number, number]> = {
-  nano: [0.10, 0.20], fast: [0.25, 0.75], code: [0.50, 1.50],
-  reason: [1.00, 3.00], heavy: [2.50, 8.00],
-  flash: [0.25, 0.75], core: [0.60, 2.00], beast: [2.50, 8.00],
-};
+// Rates come from the generated table (src/pricing.ts → tier-pricing.json). This file
+// used to carry its own copy with nano 0.10/0.20, code 0.50/1.50, reason 1.00/3.00 —
+// 38-50% below what the gateway bills, which made `maxCostUsd` stop far too late.
 
 /** Run the agentic loop to completion. Never throws — errors land in the result. */
 export async function runHeadlessAgent(
@@ -116,8 +115,8 @@ export async function runHeadlessAgent(
           const tier = chunk.metadata.tier ?? "smart";
           res.tiers[tier] = (res.tiers[tier] ?? 0) + 1;
           res.lastModel = chunk.metadata.model ?? res.lastModel;
-          const [inp, out] = TIER_COST[tier] ?? [0.5, 1.5];
-          res.costUsd += (chunk.usage.prompt_tokens * inp + chunk.usage.completion_tokens * out) / 1_000_000;
+          res.costUsd += costUsd(
+            chunk.usage.prompt_tokens, chunk.usage.completion_tokens, tier);
           loopSignal = chunk.metadata.loop_signal ?? null;
         } else if (chunk.type === "error") {
           res.stoppedBy = "error";
@@ -134,8 +133,7 @@ export async function runHeadlessAgent(
         const estCompletion = Math.ceil(fullText.length / 4);
         res.estPromptTokens += estPrompt;
         res.estCompletionTokens += estCompletion;
-        const [inp, out] = TIER_COST[opts.tier ?? "code"] ?? [0.5, 1.5];
-        res.estCostUsd += (estPrompt * inp + estCompletion * out) / 1_000_000;
+        res.estCostUsd += costUsd(estPrompt, estCompletion, opts.tier);
       }
 
       const cleaned = fullText

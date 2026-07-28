@@ -32,6 +32,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { spawnSync as _openBrowser } from "node:child_process";
 import { version as VERSION } from "../package.json";
 import { loadProjectRules } from "./agent/system-prompt.js";
+import { costUsd } from "./pricing.js";
 import { runAcpServer } from "./acp/agent.js";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -413,20 +414,24 @@ async function runHeadless(opts: {
   messages.push({ role: "user", content: opts.prompt });
 
   // 9.4: --max-cost guard for CI/cron use — abort once reported usage crosses it.
+  // Rates come from the generated table (src/pricing.ts → tier-pricing.json), NOT a
+  // local copy. This block used to hold its own: nano 0.10/0.20, code 0.50/1.50,
+  // reason 1.00/3.00 — 38-50% BELOW what the gateway bills, so `--max-cost 1` would
+  // let a CI job spend ~$1.60 before aborting. The 2026-07-28 sweep removed two other
+  // copies of that table and missed this one.
   const maxCost = opts.maxCost ? Number(opts.maxCost) : 0;
   let runCost = 0;
-  const RUN_TIER_COSTS: Record<string, [number, number]> = {
-    nano: [0.10, 0.20], fast: [0.25, 0.75], code: [0.50, 1.50],
-    reason: [1.00, 3.00], heavy: [2.50, 8.00],
-  };
 
   try {
     for await (const chunk of client.chatStream(messages, { tier: opts.model })) {
       if (chunk.type === "token" && chunk.text) {
         process.stdout.write(chunk.text);
       } else if (chunk.type === "metadata" && chunk.metadata && chunk.usage) {
-        const [inp, out] = RUN_TIER_COSTS[chunk.metadata.tier] ?? [0.5, 1.5];
-        runCost += (chunk.usage.prompt_tokens * inp + chunk.usage.completion_tokens * out) / 1_000_000;
+        runCost += costUsd(
+          chunk.usage.prompt_tokens,
+          chunk.usage.completion_tokens,
+          chunk.metadata.tier,
+        );
         if (maxCost > 0 && runCost >= maxCost) {
           process.stderr.write(`\nStopped: --max-cost $${maxCost} reached ($${runCost.toFixed(4)} spent).\n`);
           process.exit(3);
@@ -447,7 +452,7 @@ program
   .command("run [prompt]")
   .description("Run a single prompt non-interactively and stream output to stdout")
   .option("--base-url <url>", "API base URL override")
-  .option("--model <tier>", "Force routing tier (nano/fast/code/reason/heavy)")
+  .option("--model <tier>", "Force routing tier (nano/fast/code/reason/heavy/titan)")
   .option("--system <text>", "Prepend a system message before the prompt")
   .option("--max-cost <usd>", "Abort when estimated cost reaches this USD amount (exit code 3)")
   .action(async (promptArg: string | undefined, opts: {
