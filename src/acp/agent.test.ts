@@ -13,14 +13,21 @@ import * as realLocalDb from "../tools/local-db.js";
 // bun's mock.module is process-global, so every mock here re-exports the real
 // module and overrides only what a test needs to control.
 
-let chatStreamImpl: (messages: unknown[]) => AsyncGenerator<StreamChunk>;
+let chatStreamImpl: ((messages: unknown[]) => AsyncGenerator<StreamChunk>) | undefined;
 
 mock.module("../api/client.js", () => ({
   ...realClient,
   KlaatAIClient: class extends realClient.KlaatAIClient {
     constructor() { super({ baseUrl: "http://mock.invalid", apiKey: "test-token" }); }
-    override async *chatStream(messages: unknown[]): AsyncGenerator<StreamChunk> {
-      yield* chatStreamImpl(messages);
+    override async *chatStream(
+      messages: unknown[],
+      opts: Parameters<realClient.KlaatAIClient["chatStream"]>[1] = {},
+    ): AsyncGenerator<StreamChunk> {
+      // Only stub when an acp test sets chatStreamImpl. Otherwise delegate to the
+      // real stream parser — mock.module is process-global and api/client.test.ts
+      // loads after this file on CI, so a bare override here broke its fetch mocks.
+      if (chatStreamImpl) yield* chatStreamImpl(messages);
+      else yield* super.chatStream(messages as Parameters<realClient.KlaatAIClient["chatStream"]>[0], opts);
     }
   },
 }));
@@ -81,6 +88,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   rmSync(projectRoot, { recursive: true, force: true });
+  chatStreamImpl = undefined;
 });
 
 describe("AcpAgent — protocol handshake", () => {

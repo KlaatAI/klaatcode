@@ -72,6 +72,11 @@ test("parseQuotaHeaders surfaces X-KlaatAI-Loop-Signal", () => {
 // A socket that dies partway through the SSE body used to throw Bun's raw
 // "The socket connection was closed unexpectedly" out of the generator, which
 // killed the turn and discarded everything the model had already sent.
+//
+// acp/agent.test.ts installs a process-global mock.module on this file. Its
+// chatStream stub is scoped per-test; when no stub is active the mock delegates
+// to super.chatStream (see acp/agent.test.ts). These tests still mock fetch
+// directly because they exercise the real stream parser.
 
 /** Response whose SSE body emits `frames` then fails the reader. */
 function droppedStream(frames: string[]): Response {

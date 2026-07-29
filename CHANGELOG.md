@@ -5,6 +5,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); version
 
 ## [Unreleased]
 
+## [2.3.5] — 2026-07-30
+
+### Fixed
+
+- **Windows `klaatcode upgrade`** — PowerShell/curl installs no longer try to replace `klaatcode.exe` while it is running (the cause of silent `Upgrade command failed` on v2.3.2–2.3.4). Upgrade now spawns a detached helper that waits for the current process to exit, then runs the install script. npm global upgrades run through `cmd.exe` (bare `spawnSync("npm")` fails on Windows). Also detects `.bun` global installs.
+- **CI unit tests** — `acp/agent.test.ts` mock no longer breaks `chatStream` socket-drop tests in `api/client.test.ts`.
+
 ## [2.3.4] — 2026-07-30
 
 ### Fixed
