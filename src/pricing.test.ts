@@ -10,7 +10,10 @@ import {
   premiumCaps,
   tierCap,
   tierLabel,
+  tierUnitCost,
+  tierUnitCostLabel,
   tierWeight,
+  unitsScaleWithSize,
 } from "./pricing";
 
 // These rates are what the GATEWAY bills (api/server.py _USER_COST_PER_MT) and are
@@ -147,8 +150,12 @@ describe("premium caps", () => {
 });
 
 describe("labels and explicit-only", () => {
-  test("titan is flagged explicit-only, heavy is not", () => {
-    expect(isExplicitOnly("titan")).toBe(true);
+  // Auto-routing for titan was enabled 2026-07-29, so explicit_only flipped to false.
+  // The gateway side asserts this flag agrees with EDITOR_LADDER
+  // (test_titan_auto_routing_flag_matches_the_ladder), so the badge we render always
+  // matches what the router actually does.
+  test("no tier is flagged explicit-only now that titan auto-routes", () => {
+    expect(isExplicitOnly("titan")).toBe(false);
     expect(isExplicitOnly("heavy")).toBe(false);
     expect(isExplicitOnly(null)).toBe(false);
   });
@@ -167,5 +174,60 @@ describe("monthlyResetLabel", () => {
 
   test("rolls the year over in December", () => {
     expect(monthlyResetLabel(new Date("2026-12-15T12:00:00Z"))).toBe("Jan 1");
+  });
+});
+
+// A5: the /cost "Per turn" line must match what the gateway actually charges. Printing a
+// flat "titan 15×" understates a 50K-context turn by 4x — the opposite of the point of
+// showing the cost before it's spent.
+describe("A5 size-scaled unit cost", () => {
+  test("a reference-size turn costs exactly the published weight", () => {
+    expect(tierUnitCost("titan", 12_500)).toBeCloseTo(15, 3);
+    expect(tierUnitCost("heavy", 12_500)).toBeCloseTo(4, 3);
+  });
+
+  test("small turns cost less and nothing exceeds the tier weight", () => {
+    expect(tierUnitCost("titan", 5_000)).toBeCloseTo(6, 3);       // 0.4x floor
+    expect(tierUnitCost("titan", 500_000)).toBeCloseTo(15, 3);    // capped at the weight
+    expect(tierUnitCost("titan", 1)).toBeCloseTo(6, 3);
+  });
+
+  test("A6: a cheap model costs far less, an expensive one is capped", () => {
+    expect(tierUnitCost("titan", 12_500, 0.0046)).toBeLessThan(4);   // V4 Pro direct
+    expect(tierUnitCost("titan", 12_500, 0.0707)).toBeCloseTo(15, 3); // Opus, capped
+  });
+
+  test("the ceiling holds for every tier, size and cost", () => {
+    for (const tier of ["reason", "heavy", "beast", "titan"]) {
+      for (const tokens of [1, 12_500, 5_000_000]) {
+        for (const cost of [undefined, 0.0001, 1, 1000]) {
+          expect(tierUnitCost(tier, tokens, cost)).toBeLessThanOrEqual(TIER_WEIGHTS[tier]);
+        }
+      }
+    }
+  });
+
+  test("cheap tiers stay flat", () => {
+    for (const tier of ["nano", "fast", "code"]) {
+      expect(unitsScaleWithSize(tier)).toBe(false);
+      expect(tierUnitCost(tier, 500_000)).toBe(TIER_WEIGHTS[tier]);
+    }
+  });
+
+  test("missing token count falls back to the flat weight", () => {
+    expect(tierUnitCost("titan")).toBe(15);
+    expect(tierUnitCost("titan", 0)).toBe(15);
+  });
+
+  test("the label is an upper bound for cost-billed tiers, flat for the rest", () => {
+    expect(tierUnitCostLabel("titan")).toBe("≤15×");
+    expect(tierUnitCostLabel("heavy")).toBe("≤4×");
+    expect(tierUnitCostLabel("code")).toBe("1×");
+    expect(tierUnitCostLabel("nano")).toBe("0.25×");
+  });
+
+  test("the CLI agrees with the gateway on which tiers scale", () => {
+    // Mirrors api/quota.py _SIZE_AWARE_TIERS.
+    expect(["reason", "heavy", "beast", "titan"].every(unitsScaleWithSize)).toBe(true);
   });
 });

@@ -83,6 +83,7 @@ import {
   TIER_COSTS, TIER_WEIGHTS, VALID_TIERS, TIER_CONTEXT_WINDOW,
   COMPACT_TRIGGER_RATIO, costUsd, premiumCaps, tierLabel, monthlyResetLabel,
   TIER_COLOR_MAP, KLAATU_MODEL_MAP, formatTok, formatElapsed,
+  tierUnitCostLabel, unitsScaleWithSize,
 } from "./tiers.js";
 import { getPersona, PERSONAS } from "../agent/personas.js";
 import { version as APP_VERSION } from "../../package.json";
@@ -785,14 +786,15 @@ export async function runREPL(
   // ─── Tier / model pickers (/tier, /model, ctrl+p) ──────────────────────────
 
   function openTierPicker(): void {
+    const active = forceTier ?? "smart";
     dialog.showList("Select Klaatu Tier", [
-      { label: "Auto (Smart Routing)", value: "smart",  description: "Server picks optimal tier per request", color: "cyan" },
-      { label: "Klaatu Nano",          value: "nano",   description: "Fastest & cheapest",                   color: "white" },
-      { label: "Klaatu Flash",         value: "fast",   description: "Balanced speed / cost",                color: "#34d399" },
-      { label: "Klaatu Core",          value: "code",   description: "Code-optimised",                       color: "#60a5fa" },
-      { label: "Klaatu Reason",        value: "reason", description: "Advanced reasoning",                   color: "#c084fc" },
-      { label: "Klaatu Ultra",         value: "heavy",  description: "Most powerful",                        color: "#f87171" },
-      { label: "Klaatu Titan",         value: "titan",  description: "Kimi K3 · frontier, paid plans, capped/day", color: "#fb923c" },
+      { label: `Auto · Smart Routing${active === "smart" ? "  ✓" : ""}`, value: "smart",  description: "Best tier selected for every request", color: "cyan" },
+      { label: `Klaatu Nano${active === "nano" ? "  ✓" : ""}`,          value: "nano",   description: "Instant answers · lowest cost",         color: "white" },
+      { label: `Klaatu Flash${active === "fast" ? "  ✓" : ""}`,         value: "fast",   description: "Fast, balanced everyday work",           color: "#34d399" },
+      { label: `Klaatu Core${active === "code" ? "  ✓" : ""}`,          value: "code",   description: "Production coding and implementation",    color: "#60a5fa" },
+      { label: `Klaatu Reason${active === "reason" ? "  ✓" : ""}`,      value: "reason", description: "Deep analysis and complex decisions",      color: "#c084fc" },
+      { label: `Klaatu Ultra${active === "heavy" ? "  ✓" : ""}`,        value: "heavy",  description: "Large, demanding engineering tasks",       color: "#f87171" },
+      { label: `Klaatu Titan${active === "titan" ? "  ✓" : ""}`,        value: "titan",  description: "Frontier intelligence · usage capped",     color: "#fb923c" },
     ], (item) => {
       if (item.value === "smart") {
         forceTier = null;
@@ -802,6 +804,13 @@ export async function runREPL(
         const name = KLAATU_MODEL_MAP[item.value] ?? item.value;
         pushSystemMsg(`Routing tier locked to **${name}** (${item.value}).\nUse \`/tier smart\` to restore smart routing.`);
       }
+    }, () => {
+      app.requestRender();
+    }, {
+      width: 72,
+      maxHeight: 12,
+      borderFg: palette.accent,
+      initialValue: active,
     });
     app.requestRender();
   }
@@ -1834,8 +1843,9 @@ export async function runREPL(
           const q = lastQuota;
           const parts: string[] = [];
           if (q.unitsUsed !== undefined) {
-            // Weighted request units (E1). Weights come from the generated table:
-            // nano 0.25 · fast 0.5 · code 1 · reason 3 · heavy 4 · titan 10.
+            // Weighted request units (E1). Weights come from the generated table
+            // (nano 0.25 · fast 0.5 · code 1 · reason 3 · heavy 4 · titan 15), and for
+            // premium tiers A5 scales that by the turn's size — see tierUnitCostLabel().
             const limit = q.unitsLimit !== undefined ? ` / ${q.unitsLimit}` : "";
             const left = q.unitsLimit !== undefined
               ? `  (${Math.max(0, q.unitsLimit - q.unitsUsed).toFixed(0)} left)` : "";
@@ -1846,13 +1856,19 @@ export async function runREPL(
             parts.push(`  Requests:   ${q.requestsUsed}${limit}`);
           }
           if (q.plan) parts.push(`  Plan:       ${q.plan}`);
-          // What a turn costs against the pool, so a 10-unit titan turn is visible
-          // BEFORE it's spent rather than after the pool drains.
-          const costLine = ["code", "reason", "heavy", "titan"]
-            .filter(t => TIER_WEIGHTS[t] !== undefined)
-            .map(t => `${t} ${TIER_WEIGHTS[t]}×`)
-            .join(" · ");
-          if (costLine) parts.push(`  Per turn:   ${costLine}`);
+          // What a turn costs against the pool, so an expensive titan turn is visible
+          // BEFORE it's spent rather than after the pool drains. Premium tiers show a
+          // RANGE because A5 charges by turn size — printing a flat "titan 15×" would
+          // understate a 50K-context turn by 4x, which is the opposite of the point.
+          const scaled = ["code", "reason", "heavy", "titan"]
+            .filter(t => TIER_WEIGHTS[t] !== undefined);
+          const costLine = scaled.map(t => `${t} ${tierUnitCostLabel(t)}`).join(" · ");
+          if (costLine) {
+            parts.push(`  Per turn:   ${costLine}`);
+            if (scaled.some(unitsScaleWithSize)) {
+              parts.push(`              premium tiers bill by real cost — never more, often less`);
+            }
+          }
           if (parts.length) quotaBlock = `\n\n**Daily quota:**\n${parts.join("\n")}`;
 
           // Premium tiers have enforced per-day AND per-month ceilings; past them the
@@ -5354,6 +5370,21 @@ export async function runREPL(
     y >= lastFieldRect.y && y < lastFieldRect.y + lastFieldRect.height;
 
   unsubscribers.push(app.onMouse((ev) => {
+    // Modal dialogs own all mouse input while open. Rows select on click;
+    // the footer provides a clickable Back action.
+    if (dialog.active) {
+      if (ev.action === "move" && !lastPointerIsHand) {
+        process.stdout.write("\x1b]22;pointer\x07");
+        lastPointerIsHand = true;
+      }
+      dialog.handleMouse(ev);
+      if (!dialog.active && lastPointerIsHand) {
+        process.stdout.write("\x1b]22;\x07");
+        lastPointerIsHand = false;
+      }
+      return;
+    }
+
     // ── Input-field text selection (drag) ──────────────────────────────────
     if (ev.action === "press" && ev.button === 0 && inFieldRect(ev.x, ev.y)) {
       inputSelecting = true;

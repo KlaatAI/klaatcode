@@ -22,15 +22,20 @@ export {
   premiumCaps,
   tierCap,
   tierLabel,
+  tierUnitCost,
+  tierUnitCostLabel,
   tierWeight,
+  unitsScaleWithSize,
 } from "../pricing";
 
 export const VALID_TIERS = new Set(["nano", "fast", "code", "reason", "heavy", "titan"]);
 
-/** Tiers the server never auto-routes into — the user must ask by name
- * (Klaatu core/task_router.py _EDITOR_TITAN_PATTERNS, and titan is absent from
- * EDITOR_LADDER so retry/complexity bias can't escalate into it). Kept out of
- * the auto-cascade copy and of tool-facing tier enums for the same reason. */
+/** Tiers not inferred from task SHAPE — the user asks by name, or the router escalates
+ * into them from the rung below (Klaatu core/task_router.py _EDITOR_TITAN_PATTERNS).
+ * NOTE 2026-07-29: titan auto-routing is now ENABLED — it IS in EDITOR_LADDER, so retry
+ * escalation from heavy can reach it. This set still governs the auto-cascade copy and
+ * tool-facing tier enums, because titan remains something you opt into rather than
+ * something a prompt's wording lands you on. */
 export const EXPLICIT_ONLY_TIERS = new Set(["titan"]);
 
 // Context window sizes by tier — MUST match the brain's per-tier input budget

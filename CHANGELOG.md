@@ -5,10 +5,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); version
 
 ## [Unreleased]
 
+## [2.3.2] — 2026-07-29
+
 ### Added
 
 - **Titan tier (`/tier titan`)** — Klaatu's new top tier, Kimi K3 (2.5T params), is now selectable from the CLI: `/tier titan`, the `/tier` picker, `--model titan` on `klaatai run`, and shell completions. Previously the client rejected it as an invalid tier.
 - **Correct cost and context for titan turns** — the cost receipt, `/cost`, `/stats`, the context meter, and compaction now use titan's real price ($7.50 in / $37.50 out per MTok) and 220K window instead of falling back to code-tier numbers.
+- **Session lifecycle hooks** — `session_start` and `session_end` events in `.klaatai/hooks.json`, firing exactly once per session.
+- **MCP config import** — auto-import MCP servers from `.mcp.json`, `.claude.json`, and `.cursor/mcp.json`.
 
 ### Notes
 
