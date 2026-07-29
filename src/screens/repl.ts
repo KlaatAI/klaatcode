@@ -877,11 +877,19 @@ export async function runREPL(
   const SESSION_DIR = join(homedir(), ".klaatai", "sessions");
   mkdirSync(SESSION_DIR, { recursive: true });
 
+  // A resumed session must keep writing to its ORIGINAL file. Minting a fresh
+  // id here forked every resume into a second session (the old transcript was
+  // displayed but new turns landed in a new file) and dropped the server-side
+  // session affinity backing the prompt cache. The target has to be resolved
+  // BEFORE the id is chosen — the ledger path is baked into the system prompt
+  // seed further down and cannot be re-pointed afterwards.
+  const resumeTarget = opts.resumeId ? findSessionEntry(opts.resumeId) : null;
   const _sessionTs  = new Date().toISOString().slice(0, 19).replace(/:/g, "-");
   const _sessionRnd = Math.random().toString(36).slice(2, 6);
-  const sessionId   = `${_sessionTs}-${_sessionRnd}`;
-  const sessionFile = join(SESSION_DIR, `${sessionId}.jsonl`);
+  const sessionId   = resumeTarget?.id ?? `${_sessionTs}-${_sessionRnd}`;
+  const sessionFile = resumeTarget?.file ?? join(SESSION_DIR, `${sessionId}.jsonl`);
   const ledger      = new SessionLedger(join(SESSION_DIR, `${sessionId}.ledger.md`));
+  client.setSessionId(sessionId);
 
   function appendSessionMsg(msg: ChatMessage): void {
     try {
@@ -893,6 +901,13 @@ export async function runREPL(
     id: string; file: string; date: string; preview: string;
   }
 
+  /** Resolve a `--resume` argument ("last" or an id fragment) to a session. */
+  function findSessionEntry(idOrLast: string): SessionEntry | null {
+    const sessions = getSessionList();
+    if (idOrLast === "last") return sessions[0] ?? null;
+    return sessions.find(s => s.id.includes(idOrLast)) ?? null;
+  }
+
   function getSessionList(): SessionEntry[] {
     try {
       return readdirSync(SESSION_DIR)
@@ -902,9 +917,15 @@ export async function runREPL(
           const id   = f.replace(".jsonl", "");
           const file = join(SESSION_DIR, f);
           try {
-            const lines = readFileSync(file, "utf-8").trim().split("\n").filter(Boolean);
-            const firstUser = lines.map(l => JSON.parse(l) as ChatMessage).find(m => m.role === "user");
-            const preview = (firstUser?.content ?? "(empty)").slice(0, 60);
+            // Stop at the first user message. Parsing every line of every
+            // session just to build a preview meant a long transcript (these
+            // reach tens of MB) stalled startup and `/sessions`.
+            let preview = "(empty)";
+            for (const line of readFileSync(file, "utf-8").split("\n")) {
+              if (!line.trim()) continue;
+              const m = JSON.parse(line) as ChatMessage;
+              if (m.role === "user") { preview = (m.content ?? "(empty)").slice(0, 60); break; }
+            }
             const date = id.slice(0, 19).replace("T", " ").replace(/-/g, (_, i) => i < 10 ? "-" : ":");
             return { id, file, date, preview };
           } catch {
@@ -2332,7 +2353,12 @@ export async function runREPL(
           apiMessages = [...seedSystemMessages(projectRoot, ledger.path), ...apiMsgs];
           chatLinesDirty = true;
           chatAutoScroll = true;
-          pushSystemMsg(`Resumed session **${session.id}** — ${msgs.length} messages loaded.`);
+          pushSystemMsg(
+            `Resumed session **${session.id}** — ${msgs.length} messages loaded.\n\n` +
+            `New turns are saved to the current session (**${sessionId}**). ` +
+            `To keep appending to the original transcript, restart with ` +
+            `\`klaatcode --resume ${session.id}\`.`
+          );
           return true;
         }
 
@@ -3718,6 +3744,13 @@ export async function runREPL(
       chatLinesDirty = true;
     }
 
+    // A turn that ends while a card is still up (stream error thrown out of the
+    // tool loop, interrupt) would otherwise leave the card drawn over a dead
+    // promise with the input stuck on "Waiting for approval…" — unrecoverable
+    // without killing the terminal. Resolve and tear them down.
+    if (permRequest)       { const pr = permRequest;       permRequest = null;       pr.resolve("deny"); }
+    if (budgetPausePrompt) { const bp = budgetPausePrompt; budgetPausePrompt = null; bp.resolve(false); }
+
     replState    = "idle";
     streamBuffer = "";
     stopTimer();
@@ -4868,6 +4901,25 @@ export async function runREPL(
     if (slashSuggest) { slashSuggest = null; app.requestRender(); return; }
     if (themePicker) { themePicker = null; app.requestRender(); return; }
     if (askRequest) { const aq = askRequest; askRequest = null; aq.resolve("(user skipped — decide with your best judgment)"); app.requestRender(); return; }
+    // The permission and budget-pause cards both advertise "esc" in their hint
+    // line, but a specific key handler pre-empts the "*" catch-all where those
+    // branches live — so esc used to do nothing at all, leaving the promise
+    // unresolved, the input locked on "Waiting for approval…", and the CLI
+    // looking frozen. Resolve them here instead.
+    if (budgetPausePrompt) {
+      const bp = budgetPausePrompt;
+      budgetPausePrompt = null;
+      bp.resolve(false);
+      app.requestRender();
+      return;
+    }
+    if (permRequest) {
+      const pr = permRequest;
+      permRequest = null;
+      pr.resolve("deny");
+      app.requestRender();
+      return;
+    }
     // Vim mode: ESC in INSERT → switch to NORMAL; in NORMAL → cancel stream
     if (vimMode && vimInsert) {
       vimInsert   = false;
@@ -5598,19 +5650,17 @@ export async function runREPL(
   // Switch the app's render function to our full-screen REPL
   app.setRenderFn(render);
 
-  // Auto-resume if --resume flag was passed (ID resolved by pre-boot picker or directly)
+  // Auto-resume if --resume flag was passed. `resumeTarget` was resolved before
+  // the session id was minted, so sessionFile already points at this transcript
+  // and new turns append to it instead of forking a duplicate session.
   if (opts.resumeId) {
-    const sessions = getSessionList();
-    const target = opts.resumeId === "last"
-      ? sessions[0]
-      : sessions.find(s => s.id.includes(opts.resumeId!));
-    if (target) {
-      const { msgs, apiMsgs } = loadSessionFromFile(target.file);
+    if (resumeTarget) {
+      const { msgs, apiMsgs } = loadSessionFromFile(resumeTarget.file);
       messages.splice(0, messages.length, ...msgs);
       apiMessages = [...apiMessages.slice(0, apiMessages.findIndex(m => m.role !== "system") || 1), ...apiMsgs];
       chatLinesDirty = true;
       chatAutoScroll = true;
-      pushSystemMsg(`Resumed session **${target.id}** — ${msgs.length} messages loaded.`);
+      pushSystemMsg(`Resumed session **${resumeTarget.id}** — ${msgs.length} messages loaded.`);
     } else {
       pushSystemMsg(`No session matching "${opts.resumeId}". Starting fresh.`, "error");
     }

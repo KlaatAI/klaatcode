@@ -5,6 +5,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); version
 
 ## [Unreleased]
 
+## [2.3.4] — 2026-07-30
+
+### Fixed
+
+- **Session resume freeze after first message** — `klaatcode -r` could lock up after the first reply (no typing, scroll, or Ctrl+C). The pre-boot session picker left a stdin listener attached; the first Enter in the TUI re-ran cleanup and disabled raw mode. The picker now detaches cleanly on exit.
+- **Resume forked a duplicate session** — continuing a resumed chat wrote a new `.jsonl` instead of appending to the original. Resume now keeps the original session id/file and restores server session affinity.
+- **Permission card Esc was a no-op** — Esc advertised as “deny” did nothing while the card was up (specific Escape handler blocked the catch-all). Esc now denies / dismisses permission and budget-pause cards.
+- **Mid-stream socket drops** — Bun’s “socket connection was closed unexpectedly” no longer kills the turn with a raw error; partial output is kept when possible, and connect waits have a headers-only timeout.
+
+### Changed
+
+- **Faster `-r` / `/sessions`** — session previews stop at the first user message instead of parsing entire transcripts (large sessions no longer stall startup).
+
+## [2.3.3] — 2026-07-29
+
+### Changed
+
+- **Tier picker UX** — wider professional layout, aligned descriptions that no longer bleed past the border, current tier marked with ✓ and focused on open, clickable rows (mouse select), and a clickable **← Back** footer (Esc still cancels).
+
 ## [2.3.2] — 2026-07-29
 
 ### Added

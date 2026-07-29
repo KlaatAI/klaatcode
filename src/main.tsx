@@ -25,9 +25,9 @@ import { getValidAuthToken, forceRefreshToken } from "./auth/refresh.js";
 import { startOAuthBrowserAuth } from "./auth/browser.js";
 import { runSplash } from "./screens/splash.js";
 import { runREPL } from "./screens/repl.js";
-import { readFileSync, existsSync, statSync, readdirSync } from "node:fs";
+import { runSessionPicker } from "./screens/session-picker.js";
+import { existsSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { homedir } from "node:os";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { spawnSync as _openBrowser } from "node:child_process";
 import { version as VERSION } from "../package.json";
@@ -58,138 +58,6 @@ function deriveWebUrl(baseUrl: string): string {
   }
   if (baseUrl.includes("api.klaatai.com")) return "https://klaatai.com";
   return baseUrl;
-}
-
-/**
- * Pre-boot session picker: full-screen interactive list with search.
- * Shown when user runs `klaatcode -r` without an ID.
- * Returns the selected session ID or null to start fresh.
- */
-async function runSessionPicker(): Promise<string | null> {
-  const SESSION_DIR = join(homedir(), ".klaatai", "sessions");
-  let sessions: { id: string; date: string; preview: string }[] = [];
-  try {
-    sessions = readdirSync(SESSION_DIR)
-      .filter(f => f.endsWith(".jsonl"))
-      .sort().reverse().slice(0, 50)
-      .map(f => {
-        const id = f.replace(".jsonl", "");
-        try {
-          const lines = readFileSync(join(SESSION_DIR, f), "utf-8").trim().split("\n").filter(Boolean);
-          const firstUser = lines.map(l => JSON.parse(l)).find((m: any) => m.role === "user");
-          const preview = ((firstUser?.content as string) ?? "(empty)").slice(0, 80);
-          const date = id.slice(0, 16).replace("T", " ").replace(/-/g, (m, i) => i < 10 ? "-" : ":");
-          return { id, date, preview };
-        } catch {
-          return { id, date: id.slice(0, 16), preview: "(unreadable)" };
-        }
-      });
-  } catch { /* no sessions dir */ }
-
-  if (sessions.length === 0) {
-    process.stdout.write("\x1b[2mNo saved sessions found. Starting fresh.\x1b[0m\n");
-    return null;
-  }
-
-  // Enter raw mode for interactive selection
-  const { stdin, stdout } = process;
-  stdin.setRawMode(true);
-  stdin.resume();
-  stdin.setEncoding("utf-8");
-
-  let cursor = 0;
-  let search = "";
-  let filtered = sessions;
-
-  function filterSessions(): void {
-    if (!search) { filtered = sessions; return; }
-    const q = search.toLowerCase();
-    filtered = sessions.filter(s => s.preview.toLowerCase().includes(q) || s.id.includes(q) || s.date.includes(q));
-  }
-
-  function render(): void {
-    stdout.write("\x1b[2J\x1b[H"); // clear screen, cursor to top
-    const dim = "\x1b[2m";
-    const reset = "\x1b[0m";
-    const bold = "\x1b[1m";
-    const cyan = "\x1b[36m";
-    const accent = "\x1b[38;5;141m";
-    const white = "\x1b[37m";
-
-    stdout.write(`${accent}${bold}  ⏵ Resume Session${reset}\n`);
-    stdout.write(`${dim}  ─────────────────────────────────────────${reset}\n`);
-    stdout.write(`  ${cyan}Search:${reset} ${search}${dim}│${reset}\n`);
-    stdout.write(`${dim}  ─────────────────────────────────────────${reset}\n\n`);
-
-    const rows = Math.min(filtered.length, (process.stdout.rows || 24) - 8);
-    const start = Math.max(0, cursor - rows + 3);
-    for (let i = start; i < start + rows && i < filtered.length; i++) {
-      const s = filtered[i]!;
-      const isFocused = i === cursor;
-      const marker = isFocused ? `${accent}❯${reset}` : " ";
-      const datePart = s.date.slice(5, 16);
-      const previewPart = s.preview.slice(0, (process.stdout.columns || 80) - 25);
-      if (isFocused) {
-        stdout.write(`  ${marker} ${bold}${white}${datePart}${reset}  ${previewPart}\n`);
-      } else {
-        stdout.write(`  ${marker} ${dim}${datePart}${reset}  ${dim}${previewPart}${reset}\n`);
-      }
-    }
-
-    stdout.write(`\n${dim}  ↑↓ navigate · enter select · esc start fresh · type to search${reset}\n`);
-  }
-
-  render();
-
-  return new Promise<string | null>((resolveP) => {
-    function cleanup(): void {
-      stdin.setRawMode(false);
-      stdin.pause();
-      stdout.write("\x1b[2J\x1b[H"); // clear screen
-    }
-
-    stdin.on("data", (key: string) => {
-      if (key === "\x1b" || key === "\x03") {
-        // Escape or Ctrl+C — start fresh
-        cleanup();
-        resolveP(null);
-        return;
-      }
-      if (key === "\r" || key === "\n") {
-        // Enter — select
-        cleanup();
-        resolveP(filtered[cursor]?.id ?? null);
-        return;
-      }
-      if (key === "\x1b[A") {
-        // Up arrow
-        cursor = Math.max(0, cursor - 1);
-        render();
-        return;
-      }
-      if (key === "\x1b[B") {
-        // Down arrow
-        cursor = Math.min(filtered.length - 1, cursor + 1);
-        render();
-        return;
-      }
-      if (key === "\x7f" || key === "\b") {
-        // Backspace
-        search = search.slice(0, -1);
-        filterSessions();
-        cursor = 0;
-        render();
-        return;
-      }
-      // Printable character — add to search
-      if (key.length === 1 && key.charCodeAt(0) >= 32) {
-        search += key;
-        filterSessions();
-        cursor = 0;
-        render();
-      }
-    });
-  });
 }
 
 /**

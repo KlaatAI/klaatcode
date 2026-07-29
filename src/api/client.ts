@@ -440,6 +440,27 @@ export class KlaatAIClient {
   }
 
   /**
+   * POST that gives up if response *headers* never arrive, without capping how
+   * long the body may stream for — a model can legitimately think for minutes
+   * before the first token, so a whole-request timeout would truncate answers.
+   * The abort timer is cleared the moment headers land, leaving the body free.
+   */
+  private async postWithConnectTimeout(
+    url: string,
+    headers: Record<string, string>,
+    body: string,
+    connectTimeoutMs = 45_000,
+  ): Promise<Response> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), connectTimeoutMs);
+    try {
+      return await fetch(url, { method: "POST", headers, body, signal: controller.signal });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
    * Fetch lifetime aggregate usage stats for the authenticated user.
    * Returns null silently on network error or 4xx (e.g. if backend not upgraded yet).
    */
@@ -539,19 +560,25 @@ export class KlaatAIClient {
     };
     if (opts.tools?.length) body["tools"] = opts.tools;
 
-    let res = await fetch(target.url, {
-      method: "POST",
-      headers: target.headers,
-      body: JSON.stringify(body),
-    });
+    const payload = JSON.stringify(body);
+
+    let res: Response;
+    try {
+      res = await this.postWithConnectTimeout(target.url, target.headers, payload);
+    } catch (err) {
+      const aborted = err instanceof Error && err.name === "AbortError";
+      yield {
+        type: "error",
+        error: aborted
+          ? "Timed out waiting for the model to respond. Check your connection and try again."
+          : `Could not reach the model: ${err instanceof Error ? err.message : String(err)}`,
+      };
+      return;
+    }
 
     // 401 auto-recovery is a Klaatu-auth flow — custom endpoints get no retry.
     if (res.status === 401 && !this._custom && await this.tryRecoverAuth()) {
-      res = await fetch(target.url, {
-        method: "POST",
-        headers: this.headers(reqHeaders),
-        body: JSON.stringify(body),
-      });
+      res = await this.postWithConnectTimeout(target.url, this.headers(reqHeaders), payload);
     }
 
     // Honor the server retry contract (D6): X-KlaatAI-Retry "no" = the cascade
@@ -562,11 +589,7 @@ export class KlaatAIClient {
       const waitMs = KlaatAIClient.retryDelayMs(res.headers, res.status);
       if (waitMs !== null && waitMs <= 60_000) {
         await new Promise(r => setTimeout(r, waitMs));
-        res = await fetch(target.url, {
-          method: "POST",
-          headers: this.headers(reqHeaders),
-          body: JSON.stringify(body),
-        });
+        res = await this.postWithConnectTimeout(target.url, this.headers(reqHeaders), payload);
       }
     }
 
@@ -608,11 +631,39 @@ export class KlaatAIClient {
       return calls;
     };
 
+    // Tracks whether the turn produced anything usable before the connection
+    // died — decides between "salvage what we have" and "report a failure".
+    let produced = false;
+
     while (true) {
-      const { done, value } = await reader.read();
+      let done: boolean;
+      let value: Uint8Array | undefined;
+      try {
+        ({ done, value } = await reader.read());
+      } catch (err) {
+        // Mid-stream socket drop (flaky wifi, proxy/LB idle-timeout, VPN).
+        // Bun surfaces this as a raw "The socket connection was closed
+        // unexpectedly" fetch error. Letting it escape aborted the whole turn
+        // with an opaque message and no way to keep the partial answer, so
+        // degrade instead: flush what the model already sent and end cleanly.
+        const calls = flushToolCalls();
+        if (calls) { yield { type: "tool_call", tool_calls: calls }; produced = true; }
+        if (produced) {
+          yield { type: "done" };
+        } else {
+          yield {
+            type: "error",
+            error:
+              "Connection to the model was lost before any output arrived " +
+              `(${err instanceof Error ? err.message : String(err)}). ` +
+              "Check your network and send the message again.",
+          };
+        }
+        return;
+      }
       if (done) break;
 
-      buffer += decoder.decode(value, { stream: true });
+      buffer += decoder.decode(value!, { stream: true });
       const lines = buffer.split("\n");
       buffer = lines.pop() ?? "";
 
@@ -650,13 +701,14 @@ export class KlaatAIClient {
 
           // Text token
           if (delta?.content) {
+            produced = true;
             yield { type: "token", text: delta.content };
           }
 
           // Finish: emit assembled tool calls first, then usage/metadata.
           if (choice.finish_reason) {
             const calls = flushToolCalls();
-            if (calls) yield { type: "tool_call", tool_calls: calls };
+            if (calls) { produced = true; yield { type: "tool_call", tool_calls: calls }; }
             if (chunk.usage) {
               yield { type: "metadata", usage: chunk.usage, metadata: chunk.x_klaatai };
             }
