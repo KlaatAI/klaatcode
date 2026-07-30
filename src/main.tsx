@@ -103,45 +103,19 @@ async function boot(opts: { baseUrl?: string; dir?: string; resumeId?: string } 
 
   // ── 2. Show Splash ─────────────────────────────────────────────────────────
   const splash = await runSplash(app, { status: "Initializing…", projectPath: projectRoot, accent: getPalette(theme).accent, version: VERSION });
-  await sleep(300);
 
   // ── 3. Resolve API key ─────────────────────────────────────────────────────
+  // Connectivity is NOT checked here — the REPL opens immediately and pings
+  // in the background, surfacing offline state in its status bar. The only
+  // thing worth blocking on is having a token at all.
   splash.setSplashStatus("Checking credentials…");
   let apiKey: string | null =
     process.env["KLAATAI_API_KEY"] ??
     await getValidAuthToken();
 
-  if (apiKey) {
-    splash.setSplashStatus("Connecting to KlaatAI…");
-    const pingClient = new KlaatAIClient({ apiKey, baseUrl });
-    let connected = false;
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        await pingClient.ping(8_000);
-        connected = true;
-        break;
-      } catch {
-        if (attempt < 3) {
-          splash.setSplashStatus(`Retrying connection… (${attempt}/3)`);
-          await sleep(1500);
-        }
-      }
-    }
-    if (connected) {
-      splash.setSplashStatus("Connected — loading workspace…");
-      await sleep(600);
-    } else {
-      splash.setSplashStatus("Could not reach KlaatAI. Check your internet and try again.");
-      await sleep(3000);
-      splash.unmount();
-      app.quit();
-      await appDone;
-      process.exit(1);
-    }
-  } else {
+  if (!apiKey) {
     // ── 4. Browser auth: OAuth (subscription JWT) only. ───────────────────────
     splash.setSplashStatus("Opening browser to sign in…");
-    await sleep(600);
 
     const oauthCreds = await startOAuthBrowserAuth(webUrl, baseUrl, splash.setSplashStatus, 120_000);
     if (oauthCreds?.accessToken) {
@@ -157,9 +131,6 @@ async function boot(opts: { baseUrl?: string; dir?: string; resumeId?: string } 
       await appDone;
       process.exit(1);
     }
-
-    splash.setSplashStatus("Signed in — loading workspace…");
-    await sleep(600);
   }
 
   splash.unmount();

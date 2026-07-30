@@ -43,6 +43,7 @@ import {
   type ToolCall,
   type LifetimeUsageStats,
   type QuotaSnapshot,
+  type StreamChunk,
 } from "../api/client.js";
 import {
   type Config, type CustomModelConfig, saveConfig, loadConfig, getAuthToken,
@@ -53,7 +54,7 @@ import {
 } from "./diff-view.js";
 import { parsePatch } from "../tools/apply-patch.js";
 import { fuzzyScore } from "../engine/widgets/dialog.js";
-import { executeTools, TOOL_DEFINITIONS, configureSandbox } from "../tools/index.js";
+import { executeTools, TOOL_DEFINITIONS, configureSandbox, killActiveToolProcesses } from "../tools/index.js";
 import { dialectForTier, toolsForDialect, dialectIncludesExtras, type ToolDialect } from "../tools/dialects.js";
 import { PluginRegistry } from "../tools/plugins.js";
 import { configureDiagnostics } from "../tools/diagnostics.js";
@@ -61,7 +62,7 @@ import { setOutputFilterEnabled } from "../tools/output-filter.js";
 import { expandSkill, formatSkillLocation, loadSkills } from "../skills/loader.js";
 import { PhaseTracker } from "../agent/phase-budget.js";
 import { collectCriticalState, checkSummaryCoverage } from "../agent/collapse-check.js";
-import { killAllBackground } from "../tools/background.js";
+import { killAllBackground, listBackground } from "../tools/background.js";
 import { KGIndexer, type IndexProgress } from "../tools/kg-indexer.js";
 import { initLocalDb, localDbGetStats } from "../tools/local-db.js";
 import { resolveProjectId } from "../utils/project-id.js";
@@ -98,7 +99,7 @@ import {
   type PermDecision,
 } from "../permissions/index.js";
 import { exec, spawnSync } from "child_process";
-import { appendFileSync, readFileSync, writeFileSync, unlinkSync, readdirSync, existsSync, mkdirSync } from "node:fs";
+import { appendFileSync, readFileSync, writeFileSync, unlinkSync, readdirSync, existsSync, mkdirSync, statSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { homedir, tmpdir } from "node:os";
 
@@ -138,6 +139,8 @@ interface ChatMessage {
   /** Display-only unified diff for edit/write tools (not sent to the model). */
   diff?: DiffLine[];
   diffPath?: string;
+  /** Tool call still executing — renders as an animated "running" row. */
+  status?: "running";
 }
 
 interface FileChange {
@@ -156,6 +159,36 @@ interface FileChange {
  *   `plan_enforced:heavy->reason`         — you hit that tier's daily/monthly cap
  * Returns null when the served tier matched the request (nothing to explain).
  */
+/** Cost formatting: enough precision to be honest at sub-cent scale. */
+function fmtUsd(v: number): string {
+  return "$" + (v >= 0.1 ? v.toFixed(2) : v >= 0.01 ? v.toFixed(3) : v.toFixed(4));
+}
+
+/** "Reading 2 files, running 1 shell command" — aggregate label for the live tool group. */
+function runningPhrase(names: string[]): string {
+  const b = { read: 0, edit: 0, cmd: 0, search: 0, agent: 0, web: 0, other: 0 };
+  for (const n of names) {
+    if (n === "read_file") b.read++;
+    else if (["write_file", "edit_file", "multi_edit", "apply_patch"].includes(n)) b.edit++;
+    else if (n === "run_command") b.cmd++;
+    else if (["grep", "glob", "list_dir", "file_outline", "project_graph_query", "project_semantic_search"].includes(n)) b.search++;
+    else if (n === "delegate_task") b.agent++;
+    else if (n === "web_fetch" || n === "web_search") b.web++;
+    else b.other++;
+  }
+  const s = (k: number) => (k > 1 ? "s" : "");
+  const parts: string[] = [];
+  if (b.read)   parts.push(`reading ${b.read} file${s(b.read)}`);
+  if (b.edit)   parts.push(`editing ${b.edit} file${s(b.edit)}`);
+  if (b.cmd)    parts.push(`running ${b.cmd} shell command${s(b.cmd)}`);
+  if (b.search) parts.push(`searching (${b.search})`);
+  if (b.agent)  parts.push(`${b.agent} agent${s(b.agent)} working`);
+  if (b.web)    parts.push(`fetching from the web (${b.web})`);
+  if (b.other)  parts.push(`${b.other} tool call${s(b.other)}`);
+  const joined = parts.join(", ") || "working";
+  return joined[0]!.toUpperCase() + joined.slice(1);
+}
+
 function parseClamp(reason?: string): {
   from: string; to: string; why?: string; kind: "plan" | "cap";
 } | null {
@@ -275,6 +308,23 @@ export async function runREPL(
   const field   = new InputField();
   const chatSV  = new ScrollView();
   const spinner = new Spinner(SPINNER_DOTS, 80);
+
+  /** Background connectivity probe state (boot no longer gates on ping). */
+  let connState: "checking" | "online" | "offline" = "checking";
+
+  /** Tools currently executing — drives live "running" rows in the transcript. */
+  let runningToolCount = 0;
+
+  /** Messages typed while the agent was busy. Non-slash ones are steered into
+   *  the running turn at the next round boundary (Claude Code-style); slash
+   *  commands and leftovers run in order once the turn ends. */
+  const queuedMessages: string[] = [];
+
+  /** Receipt of the last completed turn — cost transparency differentiator. */
+  let lastTurnReceipt: {
+    cost: number; prompt: number; completion: number; cached: number;
+    requests: number; tiers: [string, number][]; durationMs: number;
+  } | null = null;
   const pulse   = new PulseBar();
   const tabs    = new TabBar(["Build", "Plan"]);
   const dialog  = new DialogManager();
@@ -325,6 +375,13 @@ export async function runREPL(
 
   let totalTokens:  { prompt: number; completion: number } = { prompt: 0, completion: 0 };
   let lastContextSize: number = 0; // actual context size from last API call (prompt_tokens)
+
+  /** Rough context estimate (chars/4) for a restored transcript — the meter
+   *  shows this after /resume instead of 0; the server's real prompt_tokens
+   *  replaces it on the first request. */
+  const estimateContextTokens = (msgs: Message[]): number =>
+    Math.round(msgs.reduce((n, m) =>
+      n + (typeof m.content === "string" ? m.content.length : JSON.stringify(m.content ?? "").length), 0) / 4);
   // Cumulative prompt-cache-hit input tokens this session (prefix cache). Billed
   // at ~10-40% of normal input — shown so the user sees the cache saving.
   let sessionCachedTokens = 0;
@@ -726,6 +783,9 @@ export async function runREPL(
 
   const SLASH_COMMANDS: { cmd: string; desc: string }[] = [
     { cmd: "/agents",     desc: "List agent personas + running/background agents" },
+    { cmd: "/add-dir",    desc: "Allow reads/writes in another directory this session" },
+    { cmd: "/advisor",    desc: "Consult the heavy tier on the current approach (Oracle-style)" },
+    { cmd: "/btw",        desc: "Quick side question — answered without touching the main conversation" },
     { cmd: "/checkpoint", desc: "Snapshot modified files for rollback" },
     { cmd: "/clear",      desc: "Clear conversation" },
     { cmd: "/commit",     desc: "AI commit message + commit" },
@@ -746,6 +806,7 @@ export async function runREPL(
     { cmd: "/resume",     desc: "Resume a saved session" },
     { cmd: "/review",     desc: "AI code review of current git diff" },
     { cmd: "/rollback",   desc: "Restore files from a checkpoint" },
+    { cmd: "/security-review", desc: "Security-focused review of uncommitted changes" },
     { cmd: "/sessions",   desc: "List saved sessions" },
     { cmd: "/export",     desc: "Export session to Markdown [path]" },
     { cmd: "/share",      desc: "Alias for /export" },
@@ -755,6 +816,7 @@ export async function runREPL(
     { cmd: "/tier",       desc: "Lock a Klaatu routing tier (smart to reset)" },
     { cmd: "/undo",       desc: "Revert files written by last response" },
     { cmd: "/vimmode",    desc: "Toggle vim key bindings" },
+    { cmd: "/whoami",     desc: "Logged-in account, plan, backend, version" },
     { cmd: "/why",        desc: "Explain last routing decision" },
   ];
 
@@ -897,6 +959,20 @@ export async function runREPL(
     } catch { /* ignore write errors */ }
   }
 
+  /** Cumulative usage snapshot — one line per turn; the last one wins on resume. */
+  function appendSessionStats(): void {
+    try {
+      appendFileSync(sessionFile, JSON.stringify({
+        stats: {
+          requests:   totalRequests,
+          prompt:     totalTokens.prompt,
+          completion: totalTokens.completion,
+          cost:       sessionCost,
+        },
+      }) + "\n", "utf-8");
+    } catch { /* ignore write errors */ }
+  }
+
   interface SessionEntry {
     id: string; file: string; date: string; preview: string;
   }
@@ -935,10 +1011,18 @@ export async function runREPL(
     } catch { return []; }
   }
 
-  function loadSessionFromFile(file: string): { msgs: ChatMessage[]; apiMsgs: Message[] } {
+  interface SessionStats { requests: number; prompt: number; completion: number; cost: number }
+
+  function loadSessionFromFile(file: string): { msgs: ChatMessage[]; apiMsgs: Message[]; stats: SessionStats | null } {
     try {
       const lines = readFileSync(file, "utf-8").trim().split("\n").filter(Boolean);
-      const msgs  = lines.map(l => JSON.parse(l) as ChatMessage);
+      const msgs: ChatMessage[] = [];
+      let stats: SessionStats | null = null;
+      for (const l of lines) {
+        const rec = JSON.parse(l) as ChatMessage & { stats?: SessionStats };
+        if (rec.stats) { stats = rec.stats; continue; } // usage snapshot, not a message
+        if (rec.role) msgs.push(rec);
+      }
       const apiMsgs: Message[] = [];
       for (const m of msgs) {
         if (m.role === "user")
@@ -946,8 +1030,16 @@ export async function runREPL(
         else if (m.role === "assistant" && m.kind !== "error")
           apiMsgs.push({ role: "assistant", content: m.content });
       }
-      return { msgs, apiMsgs };
-    } catch { return { msgs: [], apiMsgs: [] }; }
+      return { msgs, apiMsgs, stats };
+    } catch { return { msgs: [], apiMsgs: [], stats: null }; }
+  }
+
+  /** Restore the sidebar Session counters from a resumed transcript. */
+  function restoreSessionStats(stats: SessionStats | null): void {
+    if (!stats) return;
+    totalRequests = stats.requests;
+    totalTokens   = { prompt: stats.prompt, completion: stats.completion };
+    sessionCost   = stats.cost;
   }
 
   // Transcript starts empty — the welcome banner is rendered as the empty
@@ -964,11 +1056,14 @@ export async function runREPL(
   apiMessages.push(...seedSystemMessages(projectRoot, ledger.path));
 
   // Write sandbox — confine edits/writes to the project unless configured off.
-  configureSandbox({
+  // /add-dir extends the allowlist for this session only.
+  const sessionExtraDirs: string[] = [];
+  const applySandbox = (): void => configureSandbox({
     enabled: config.sandbox !== "off",
     root: projectRoot,
-    allow: [join(homedir(), ".klaatai"), ...(config.sandboxAllow ?? [])],
+    allow: [join(homedir(), ".klaatai"), ...(config.sandboxAllow ?? []), ...sessionExtraDirs],
   });
+  applySandbox();
 
   // Post-edit diagnostics feedback loop.
   configureDiagnostics({
@@ -1173,6 +1268,11 @@ export async function runREPL(
         let verb = _lm ? _lm[1] : rawLabel;
         const target = _lm ? _lm[2].replace(/\s+/g, " ").trim() : "";
         if (verb !== "$" && /^[a-z]/.test(verb)) verb = verb[0].toUpperCase() + verb.slice(1);
+
+        // Still executing — skipped here; running calls render as one
+        // aggregate group (pulsing dot + per-call detail) at the tail below.
+        if (msg.status === "running") continue;
+
         const statusColor = failed ? 204 : 114;
         // Filled dot for a tool call; caret when expanded. Colour = status.
         const marker = isLong && !isCollapsed ? "▾ " : "⏺ ";
@@ -1263,6 +1363,45 @@ export async function runREPL(
     // Save message lines (expensive part) for fast-path reuse
     cachedMessageLines = [...lines];
 
+    // ── Live tool group — Claude-style aggregate with pulsating dot ─────
+    // "● Reading 1 file, running 2 shell commands…" + one ⎿ line per call.
+    // Finished calls leave the group and appear as normal ⏺ rows above.
+    const runningMsgs = messages.filter(m => m.role === "tool" && m.status === "running");
+    if (runningMsgs.length > 0) {
+      const dotBright = (_animTick % 8) < 4;
+      lines.push([]);
+      lines.push([
+        span("● ", { fg: dotBright ? palette.accent : palette.mutedFg - 2, bold: true }),
+        span(runningPhrase(runningMsgs.map(m => m.toolName ?? "tool")) + "…", { fg: palette.chatFg as number | "white", bold: true }),
+      ]);
+      for (const m of runningMsgs.slice(0, 6)) {
+        const label = (m.toolSummary ?? m.toolName ?? "tool").replace(/\s+/g, " ");
+        lines.push([
+          span("  ⎿ ", { fg: palette.mutedFg - 5 }),
+          span(label.length > contentW - 6 ? label.slice(0, contentW - 9) + "…" : label, { fg: palette.mutedFg }),
+        ]);
+      }
+      if (runningMsgs.length > 6) {
+        lines.push([span(`     … +${runningMsgs.length - 6} more`, { fg: palette.mutedFg - 3 })]);
+      }
+      lines.push([]);
+    }
+
+    // ── Queued input chips — typed during the turn, not yet delivered ───
+    if (queuedMessages.length > 0) {
+      for (const q of queuedMessages.slice(0, 4)) {
+        lines.push([
+          span("  ↳ ", { fg: 214, bold: true }),
+          span("queued  ", { fg: palette.mutedFg, italic: true }),
+          span(q.length > contentW - 14 ? q.slice(0, contentW - 17) + "…" : q, { fg: palette.chatFg as number | "white" }),
+        ]);
+      }
+      if (queuedMessages.length > 4) {
+        lines.push([span(`     … +${queuedMessages.length - 4} more`, { fg: palette.mutedFg - 3 })]);
+      }
+      lines.push([]);
+    }
+
     // ── Streaming partial response ────────────────────────────────────
     if (streamBuffer && (replState === "streaming" || replState === "thinking")) {
       lines.push([]);
@@ -1327,6 +1466,7 @@ export async function runREPL(
   // ─── Permission handling ──────────────────────────────────────────────────
 
   function requestPermission(tc: ToolCall): Promise<PermDecision> {
+    notifyTerminal("Klaat Code — approval needed");
     return new Promise((resolve) => {
       const d = diffForTool(tc);
       permRequest = {
@@ -1847,6 +1987,168 @@ export async function runREPL(
         return true;
       }
 
+      case "/add-dir": {
+        const dirArg = parts.slice(1).join(" ").trim();
+        if (!dirArg) {
+          pushSystemMsg(
+            "Usage: `/add-dir <path>` — allow the agent to read/write that directory for this session." +
+            (sessionExtraDirs.length ? `\n\nCurrently added: ${sessionExtraDirs.join(", ")}` : ""),
+          );
+          return true;
+        }
+        const abs = resolve(projectRoot, dirArg.replace(/^~(?=\/|$)/, homedir()));
+        if (!existsSync(abs) || !statSync(abs).isDirectory()) {
+          pushSystemMsg(`Not a directory: ${abs}`, "error");
+          return true;
+        }
+        if (!sessionExtraDirs.includes(abs)) sessionExtraDirs.push(abs);
+        applySandbox();
+        // Tell the model — the env block was seeded before this dir existed.
+        apiMessages = [...apiMessages, {
+          role: "system",
+          content: `The user added an extra working directory for this session: ${abs}. You may read and write files there.`,
+        }];
+        pushSystemMsg(`Added working directory for this session: **${abs}**`);
+        return true;
+      }
+
+      case "/security-review":
+        // Security-focused preset over the /review flow (uncommitted changes).
+        return handleSlashCommand(
+          "/review focus strictly on security: injection (SQL/shell/path), auth/authz gaps, " +
+          "secrets or credentials in code, SSRF, unsafe deserialization, path traversal, " +
+          "XSS, race conditions on privileged state, and dependency risks",
+        );
+
+      case "/advisor": {
+        if (replState !== "idle") {
+          pushSystemMsg("Advisor needs the turn to finish — it reads the current conversation. It will run right after if you queue it.", "error");
+          return true;
+        }
+        const aq = parts.slice(1).join(" ").trim() ||
+          "Review the current approach in this conversation. What is wrong, risky, or over-complicated? What would a senior engineer do differently? Be direct and specific.";
+        const aMsg: ChatMessage = { role: "system", content: `⚖ **advisor** (heavy tier) — ${aq}\n\n_consulting…_` };
+        messages.push(aMsg);
+        chatLinesDirty = true;
+        app.requestRender();
+        // Flatten recent context — the advisor is one-shot, no tools.
+        const recent = apiMessages
+          .filter(m => m.role !== "system")
+          .slice(-14)
+          .map(m => {
+            const c = typeof m.content === "string" ? m.content : JSON.stringify(m.content ?? "");
+            const role = m.role === "tool" ? "tool result" : m.role;
+            return `[${role}] ${c.slice(0, 1500)}`;
+          })
+          .join("\n\n");
+        void (async () => {
+          try {
+            const req: Message[] = [
+              {
+                role: "system",
+                content:
+                  "You are a senior engineering advisor consulted mid-task inside a coding CLI. " +
+                  "You see a condensed transcript of the working session. Give sharp, specific guidance: " +
+                  "call out flawed assumptions, risky changes, simpler designs, and missed edge cases. " +
+                  "No flattery, no tools, no code dumps — advice a strong tech lead would give in review.",
+              },
+              { role: "user", content: `Session transcript (condensed):\n\n${recent}\n\n---\n\nConsult request: ${aq}` },
+            ];
+            let out = "";
+            // 120s header timeout: prod heavy still buffers the whole
+            // completion before responding (until the A2 deploy lands).
+            const stream = client.chatStream(req, { tier: "heavy", connectTimeoutMs: 120_000 });
+            for await (const chunk of stream) {
+              if (chunk.type === "error") throw new Error(chunk.error ?? "stream error");
+              if (chunk.type === "token") {
+                out += chunk.text ?? "";
+                aMsg.content = `⚖ **advisor** (heavy tier) — ${aq}\n\n${out}`;
+                chatLinesDirty = true;
+                app.requestRender();
+              } else {
+                recordSideUsage(chunk, "heavy");
+              }
+            }
+            const advice = out.trim();
+            aMsg.content = `⚖ **advisor** (heavy tier) — ${aq}\n\n${advice || "(no advice)"}`;
+            if (advice) {
+              // Feed the guidance back so the main agent applies it next turn.
+              apiMessages = [...apiMessages, {
+                role: "system",
+                content: `[Advisor consult — senior-model guidance the user requested; apply it]:\n${advice}`,
+              }];
+            }
+          } catch (e) {
+            aMsg.content = `⚖ **advisor** — ${aq}\n\n_consult failed: ${e instanceof Error ? e.message : String(e)}_`;
+          }
+          chatLinesDirty = true;
+          app.requestRender();
+        })();
+        return true;
+      }
+
+      case "/btw": {
+        const q = parts.slice(1).join(" ").trim();
+        if (!q) {
+          pushSystemMsg("Usage: `/btw <question>` — quick side answer on a cheap tier. Runs even while the agent is busy; the main conversation and its context stay untouched.");
+          return true;
+        }
+        const qMsg: ChatMessage = { role: "system", content: `↷ **btw** — ${q}\n\n_thinking…_` };
+        messages.push(qMsg);
+        chatLinesDirty = true;
+        app.requestRender();
+        void (async () => {
+          try {
+            const req: Message[] = [
+              {
+                role: "system",
+                content:
+                  "You are a quick side-channel assistant inside a coding CLI. The user asked a side " +
+                  "question while their main task continues separately. Answer directly and concisely — " +
+                  "a few sentences, no tools, no code edits. If the question needs project context you " +
+                  "don't have, say so briefly.",
+              },
+              { role: "user", content: q },
+            ];
+            let out = "";
+            const stream = client.chatStream(req, { tier: "fast" });
+            for await (const chunk of stream) {
+              if (chunk.type === "error") throw new Error(chunk.error ?? "stream error");
+              if (chunk.type === "token") {
+                out += chunk.text ?? "";
+                qMsg.content = `↷ **btw** — ${q}\n\n${out}`;
+                chatLinesDirty = true;
+                app.requestRender();
+              } else {
+                recordSideUsage(chunk, "fast");
+              }
+            }
+            qMsg.content = `↷ **btw** — ${q}\n\n${out.trim() || "(no answer)"}`;
+          } catch (e) {
+            qMsg.content = `↷ **btw** — ${q}\n\n_side question failed: ${e instanceof Error ? e.message : String(e)}_`;
+          }
+          chatLinesDirty = true;
+          app.requestRender();
+        })();
+        return true;
+      }
+
+      case "/whoami": {
+        const creds = loadCredentials();
+        const account = creds.email
+          ?? (creds.accessToken ? "signed in (email not on record)" : "not signed in — run `klaatai login`");
+        pushSystemMsg([
+          "**Session**",
+          `  Account:  ${account}`,
+          ...(creds.userId ? [`  User id:  ${creds.userId}`] : []),
+          ...(lastQuota?.plan ? [`  Plan:     ${lastQuota.plan}`] : []),
+          `  Backend:  ${config.baseUrl}`,
+          `  Version:  v${APP_VERSION}`,
+          `  Network:  ${connState}`,
+        ].join("\n"));
+        return true;
+      }
+
       case "/clear":
         messages.length = 0; // empty → welcome banner shows again
         apiMessages = seedSystemMessages(projectRoot, ledger.path);
@@ -1939,7 +2241,15 @@ export async function runREPL(
               .map(p => `  ${p.padEnd(9)} ${formatTok(pt[p])} / ${formatTok(phaseTracker.budgets[p])} toks${p === phaseTracker.phase ? "  ← now" : ""}`)
               .join("\n")
           : "";
+        const lastTurnBlock = lastTurnReceipt
+          ? `**Last turn (receipt):**\n` +
+            `  Cost: ${fmtUsd(lastTurnReceipt.cost)} — ${lastTurnReceipt.requests} request${lastTurnReceipt.requests === 1 ? "" : "s"} (${lastTurnReceipt.tiers.map(([t, n]) => `${t}×${n}`).join(", ")})\n` +
+            `  Tokens: ${formatTok(lastTurnReceipt.prompt)} in / ${formatTok(lastTurnReceipt.completion)} out` +
+            (lastTurnReceipt.cached > 0 ? ` (${formatTok(lastTurnReceipt.cached)} cached)` : "") + `\n` +
+            `  Duration: ${Math.round(lastTurnReceipt.durationMs / 1000)}s\n\n`
+          : "";
         pushSystemMsg(
+          lastTurnBlock +
           `**Session:**\n` +
           `  Requests: ${totalRequests}\n` +
           `  Total input:  ${formatTok(totalTokens.prompt)} toks (cumulative)\n` +
@@ -2348,9 +2658,11 @@ export async function runREPL(
             pushSystemMsg(`No session matching "${id}". Use /sessions to list saved sessions.`, "error");
             return true;
           }
-          const { msgs, apiMsgs } = loadSessionFromFile(session.file);
+          const { msgs, apiMsgs, stats } = loadSessionFromFile(session.file);
           messages.splice(0, messages.length, ...msgs);
           apiMessages = [...seedSystemMessages(projectRoot, ledger.path), ...apiMsgs];
+          lastContextSize = estimateContextTokens(apiMessages);
+          restoreSessionStats(stats);
           chatLinesDirty = true;
           chatAutoScroll = true;
           pushSystemMsg(
@@ -2829,14 +3141,48 @@ export async function runREPL(
             pushSystemMsg("Cannot start a review while a response is in progress.", "error");
             return true;
           }
-          const ref = parts.slice(1).join(" ").trim() || "";
-          const gitArgs = ref ? ["diff", ref] : ["diff", "HEAD"];
+          // Presets (Codex-style): /review → uncommitted; /review base <branch>
+          // → vs merge-base; /review commit <sha> → that commit; /review <ref>
+          // → that ref/range; anything else → custom focus on uncommitted.
+          const argStr = parts.slice(1).join(" ").trim();
+          const argv   = argStr.split(/\s+/).filter(Boolean);
+          let gitArgs: string[] = ["diff", "HEAD"];
+          let label = "working-tree changes";
+          let focus = "";
+          // Refs are data, never flags: anything starting with "-" must not
+          // reach git argv (argument injection — e.g. "--output=<file>").
+          const safeRef = (r: string): boolean => /^[A-Za-z0-9._/~^@{}][A-Za-z0-9._/~^@{}-]*(\.\.\.?[A-Za-z0-9._/~^@{}-]+)?$/.test(r);
+          if (argv[0] === "base" && argv[1] && safeRef(argv[1])) {
+            gitArgs = ["diff", `${argv[1]}...HEAD`];
+            label   = `changes vs base \`${argv[1]}\``;
+            focus   = argv.slice(2).join(" ");
+          } else if (argv[0] === "commit" && argv[1] && safeRef(argv[1])) {
+            gitArgs = ["diff", `${argv[1]}^`, argv[1]];
+            label   = `commit \`${argv[1]}\``;
+            focus   = argv.slice(2).join(" ");
+          } else if (argStr) {
+            // Single safe-looking ref/range → probe it; anything else
+            // (multi-word, flag-like, punctuation) is a focus request and
+            // never touches git.
+            const probe = argv.length === 1 && safeRef(argStr)
+              ? spawnSync("git", ["diff", "--quiet", argStr], {
+                  cwd: projectRoot, encoding: "utf-8", timeout: 15_000,
+                })
+              : null;
+            if (probe && (probe.status === 0 || probe.status === 1)) { // 0=no diff, 1=diff, 128=bad ref
+              gitArgs = ["diff", argStr];
+              label   = `\`${argStr}\``;
+            } else {
+              focus = argStr;
+            }
+          }
+
           let diffOut = spawnSync("git", gitArgs, {
             cwd: projectRoot, encoding: "utf-8", timeout: 15_000,
           }).stdout?.trim() ?? "";
 
           // Fallback to staged changes if working-tree diff is empty
-          if (!diffOut) {
+          if (!diffOut && gitArgs[1] === "HEAD") {
             diffOut = spawnSync("git", ["diff", "--staged"], {
               cwd: projectRoot, encoding: "utf-8", timeout: 15_000,
             }).stdout?.trim() ?? "";
@@ -2846,9 +3192,11 @@ export async function runREPL(
             pushSystemMsg(
               "No changes found to review.\n\n" +
               "Tips:\n" +
-              "  - Stage or edit some files first\n" +
-              "  - Use `/review HEAD~1` to review the last commit\n" +
-              "  - Use `/review main..HEAD` for a range",
+              "  - `/review` — uncommitted changes\n" +
+              "  - `/review base main` — everything on this branch vs main\n" +
+              "  - `/review commit <sha>` — one commit\n" +
+              "  - `/review HEAD~1` or `/review main..HEAD` — any ref/range\n" +
+              "  - `/review focus on security` — custom focus on uncommitted changes",
               "error",
             );
             return true;
@@ -2863,15 +3211,16 @@ export async function runREPL(
           const reviewPrompt =
             `Please do a thorough code review of the following git diff:\n\n` +
             "```diff\n" + diffText + "\n```\n\n" +
+            (focus ? `The user asked you to specifically focus on: **${focus}**\n\n` : "") +
             "Focus on:\n" +
             "1. **Correctness** — bugs, edge cases, off-by-one errors\n" +
             "2. **Security** — injections, data exposure, auth gaps\n" +
             "3. **Performance** — unnecessary work, inefficient algorithms\n" +
             "4. **Maintainability** — naming, complexity, duplication\n" +
             "5. **Tests** — missing coverage for new/changed logic\n\n" +
-            "For each issue found, cite the file and line, explain the problem, and suggest a fix.";
+            "Order findings by severity (most severe first). For each issue found, cite the file and line, explain the problem, and suggest a fix.";
 
-          pushSystemMsg(`Starting code review${ref ? ` of \`${ref}\`` : " of working-tree changes"}…`);
+          pushSystemMsg(`Starting code review of ${label}${focus ? ` (focus: ${focus})` : ""}…`);
           void sendMessage(reviewPrompt, { noTools: true });
           return true;
         }
@@ -3143,6 +3492,7 @@ export async function runREPL(
 
   async function sendMessage(text: string, opts: { noTools?: boolean } = {}): Promise<void> {
     if (!text.trim()) return;
+    const turnT0 = Date.now();
 
     // ── ! shell injection ─────────────────────────────────────────────────
     if (text.trimStart().startsWith("!")) {
@@ -3279,11 +3629,54 @@ export async function runREPL(
       let currentApiMessages = [...newApiMessages];
       // 9.4: per-response doom-loop signal (reset each round).
       let turnLoopSignal: import("../api/client.js").LoopSignal | null = null;
+      // Per-turn tool tally for the end-of-turn summary line.
+      const turnToolCounts = new Map<string, number>();
+      const turnStartedAt = Date.now();
+      // Per-turn usage — feeds the cost receipt on the summary line + /cost.
+      const turnUsage = {
+        cost: 0, prompt: 0, completion: 0, cached: 0, requests: 0,
+        tiers: new Map<string, number>(),
+      };
+
+      // Pre-flight estimate — only when the user pinned a premium tier, where
+      // the price is knowable up front. (Auto-routed turns can't be estimated
+      // honestly: the server picks the tier per request.)
+      if (forceTier && ["reason", "heavy", "titan"].includes(forceTier)) {
+        const [inp, out] = TIER_COSTS[forceTier] ?? [0, 0];
+        const inTok = Math.max(lastContextSize, estimateContextTokens(currentApiMessages));
+        const lo = (inTok * inp +   500 * out) / 1_000_000;
+        const hi = (inTok * inp + 4_000 * out) / 1_000_000;
+        if (hi >= 0.005) {
+          messages.push({
+            role: "system",
+            content: `*Est. this turn on pinned ${forceTier}: ${fmtUsd(lo)}–${fmtUsd(hi)} (${formatTok(inTok)} in; tool rounds re-bill input).*`,
+          });
+          chatLinesDirty = true;
+        }
+      }
 
       interrupted = false;
 
       outerLoop: while (true) {
         if (interrupted) break outerLoop;
+
+        // Steering: input typed during this turn joins the conversation at
+        // the round boundary so the model sees it mid-task. Slash commands
+        // stay queued and run after the turn.
+        if (queuedMessages.length > 0) {
+          const later: string[] = [];
+          for (const q of queuedMessages) {
+            if (q.startsWith("/")) { later.push(q); continue; }
+            const um: ChatMessage = { role: "user", content: q };
+            messages.push(um);
+            appendSessionMsg(um);
+            currentApiMessages = [...currentApiMessages, { role: "user", content: q }];
+          }
+          queuedMessages.length = 0;
+          queuedMessages.push(...later);
+          chatLinesDirty = true;
+        }
+
         replState    = "thinking";
         streamBuffer = "";
         fullText     = "";
@@ -3370,6 +3763,12 @@ export async function runREPL(
                 );
                 sessionCost += turnCost;
                 recordTurnCost(turnCost);
+                turnUsage.cost       += turnCost;
+                turnUsage.prompt     += chunk.usage.prompt_tokens;
+                turnUsage.completion += chunk.usage.completion_tokens;
+                turnUsage.cached     += chunk.usage.cached_tokens ?? 0;
+                turnUsage.requests++;
+                turnUsage.tiers.set(lastTier, (turnUsage.tiers.get(lastTier) ?? 0) + 1);
                 totalTokens = {
                   prompt:     totalTokens.prompt     + chunk.usage.prompt_tokens,
                   completion: totalTokens.completion + chunk.usage.completion_tokens,
@@ -3537,9 +3936,38 @@ export async function runREPL(
           }
 
           for (const batch of batches) {
+          // Live rows: each tool call appears immediately as an animated
+          // "running" row, then the same message is finalized in place when
+          // its result lands (parallel batch members finish independently).
+          const placeholders = batch.map((tc): ChatMessage => ({
+            role:        "tool",
+            content:     "",
+            toolName:    tc.function.name,
+            toolSummary: summarizeTool(tc),
+            collapsed:   true,
+            status:      "running",
+          }));
+          for (const ph of placeholders) messages.push(ph);
+          runningToolCount += batch.length;
+          chatLinesDirty = true;
+          app.requestRender();
+
+          const runOne = async (tc: ToolCall, ph: ChatMessage): Promise<string> => {
+            try {
+              const r = await executeWithPermission(tc);
+              ph.content = r;
+              return r;
+            } finally {
+              if (!ph.content) ph.content = "Error: tool execution failed";
+              delete ph.status;
+              runningToolCount--;
+              chatLinesDirty = true;
+              app.requestRender();
+            }
+          };
           const batchResults = batch.length === 1
-            ? [await executeWithPermission(batch[0]!)]
-            : await Promise.all(batch.map(b => executeWithPermission(b)));
+            ? [await runOne(batch[0]!, placeholders[0]!)]
+            : await Promise.all(batch.map((b, i) => runOne(b, placeholders[i]!)));
           app.requestRender();
 
           for (let bi = 0; bi < batch.length; bi++) {
@@ -3547,16 +3975,11 @@ export async function runREPL(
             const toolResult = batchResults[bi]!;
             const toolLines = toolResult.split("\n").length;
             const editDiff = toolResult.startsWith("Error") ? undefined : diffForTool(tc);
-            const toolMsg: ChatMessage = {
-              role:        "tool",
-              content:     toolResult,
-              toolName:    tc.function.name,
-              toolSummary: summarizeTool(tc),
-              collapsed:   editDiff ? false : toolLines > 6,
-              diff:        editDiff?.diff,
-              diffPath:    editDiff?.path,
-            };
-            messages.push(toolMsg);
+            const toolMsg = placeholders[bi]!;
+            toolMsg.collapsed = editDiff ? false : toolLines > 6;
+            toolMsg.diff     = editDiff?.diff;
+            toolMsg.diffPath = editDiff?.path;
+            turnToolCounts.set(tc.function.name, (turnToolCounts.get(tc.function.name) ?? 0) + 1);
             appendSessionMsg(toolMsg);
             chatLinesDirty = true;
 
@@ -3683,6 +4106,52 @@ export async function runREPL(
           fullText.replace(/<(?:thinking|reasoning)>[\s\S]*?<\/(?:thinking|reasoning)>/g, "")
         ).trim();
 
+        // Turn activity summary (Claude-style): one dim line tallying the
+        // tool work that produced this answer, e.g. "Read 3 files · 2 edits
+        // · ran 2 commands · 34s".
+        if (turnToolCounts.size > 0) {
+          const n = (names: string[]) => names.reduce((s, k) => s + (turnToolCounts.get(k) ?? 0), 0);
+          const reads    = n(["read_file"]);
+          const searches = n(["grep", "glob", "list_dir", "file_outline", "project_graph_query", "project_semantic_search", "web_search"]);
+          const edits    = n(["edit_file", "multi_edit", "write_file", "apply_patch"]);
+          const cmds     = n(["run_command"]);
+          const fetches  = n(["web_fetch"]);
+          const agents   = n(["delegate_task"]);
+          const counted  = reads + searches + edits + cmds + fetches + agents;
+          const others   = [...turnToolCounts.values()].reduce((a, b) => a + b, 0) - counted;
+          const parts: string[] = [];
+          if (reads)    parts.push(`read ${reads} file${reads > 1 ? "s" : ""}`);
+          if (searches) parts.push(`${searches} search${searches > 1 ? "es" : ""}`);
+          if (edits)    parts.push(`${edits} edit${edits > 1 ? "s" : ""}`);
+          if (cmds)     parts.push(`ran ${cmds} command${cmds > 1 ? "s" : ""}`);
+          if (fetches)  parts.push(`fetched ${fetches} page${fetches > 1 ? "s" : ""}`);
+          if (agents)   parts.push(`${agents} agent${agents > 1 ? "s" : ""}`);
+          if (others > 0) parts.push(`${others} other tool${others > 1 ? "s" : ""}`);
+          if (parts.length > 0) {
+            const secs  = Math.round((Date.now() - turnStartedAt) / 1000);
+            // Cost receipt: what this turn actually cost, and what the same
+            // tokens would have cost on the frontier (titan) baseline.
+            if (turnUsage.cost > 0) {
+              parts.push(fmtUsd(turnUsage.cost));
+              const [tin, tout] = TIER_COSTS["titan"] ?? [7.5, 37.5];
+              const titanCost = (turnUsage.prompt * tin + turnUsage.completion * tout) / 1_000_000;
+              const saved = titanCost - turnUsage.cost;
+              if (saved >= 0.01) parts.push(`saved ${fmtUsd(saved)} vs frontier`);
+            }
+            const first = parts[0]!;
+            const line  = [first[0]!.toUpperCase() + first.slice(1), ...parts.slice(1)].join(" · ")
+              + (secs >= 2 ? ` · ${secs}s` : "");
+            messages.push({ role: "system", content: `*${line}*` });
+          }
+        }
+        if (turnUsage.requests > 0) {
+          lastTurnReceipt = {
+            cost: turnUsage.cost, prompt: turnUsage.prompt, completion: turnUsage.completion,
+            cached: turnUsage.cached, requests: turnUsage.requests,
+            tiers: [...turnUsage.tiers.entries()], durationMs: Date.now() - turnStartedAt,
+          };
+        }
+
         const assistantMsg: ChatMessage = {
           role: "assistant",
           content: cleanContent || fullText,
@@ -3694,6 +4163,7 @@ export async function runREPL(
         };
         messages.push(assistantMsg);
         appendSessionMsg(assistantMsg);
+        appendSessionStats();
         apiMessages = [...currentApiMessages, { role: "assistant", content: cleanContent || fullText }];
         runHooks("after_message", { KLAATAI_ASSISTANT_RESPONSE: fullText.slice(0, 500) });
         chatLinesDirty = true;
@@ -3755,6 +4225,12 @@ export async function runREPL(
     streamBuffer = "";
     stopTimer();
     app.requestRender();
+
+    // Long turn finished — ping the terminal so a tabbed-away user knows.
+    if (Date.now() - turnT0 > 15_000) notifyTerminal("Klaat Code — task finished");
+
+    // Input queued after the last round boundary runs now, in order.
+    drainQueue();
   }
 
   // ─── Context compaction ───────────────────────────────────────────────────
@@ -4320,27 +4796,51 @@ export async function runREPL(
       };
       pulse.draw(buf, pulseR, { fg: palette.accent, bg: inputBg }, { fg: palette.border, bg: inputBg });
 
-      // Rotating verb — a new one every 3s so long waits feel alive.
+      // Activity label: real tool work when tools run ("Reading 1 file,
+      // running 2 shell commands…"), rotating whimsy verb otherwise.
       const verbOf = (verbs: string[]) => verbs[Math.floor(elapsed / 3) % verbs.length]!;
+      const liveTools = messages.filter(m => m.role === "tool" && m.status === "running");
       const stateLabel =
+        liveTools.length > 0      ? `${runningPhrase(liveTools.map(m => m.toolName ?? "tool"))}…` :
+        replState === "tool"      ? (subAgentLive.size > 0 ? "Delegating…" : `${verbOf(THINKING_VERBS)}…`) :
         replState === "thinking"  ? `${verbOf(THINKING_VERBS)}…` :
         replState === "streaming" ? `${verbOf(WRITING_VERBS)}…` :
-        replState === "tool"      ? (subAgentLive.size > 0 ? "Delegating…" : "Running tools…") :
         "Working…";
-      // Live detail: elapsed + rough streamed-token count when text is flowing.
+      // Live detail: elapsed + streamed tokens (Claude-style "1m 40s · ↓ 6.2k tokens").
       const streamedTok = streamBuffer.length > 0 ? Math.round(streamBuffer.length / 4) : 0;
       const details = [
-        elapsed > 0 ? `${elapsed}s` : "",
-        streamedTok > 0 ? `~${formatTok(streamedTok)} tok` : "",
+        elapsed > 0 ? formatElapsed(elapsed) : "",
+        streamedTok > 0 ? `↓ ${formatTok(streamedTok)} tokens` : "",
       ].filter(Boolean).join(" · ");
 
-      const statusLine: StyledLine = [
-        span(`${spinner.frame} `, { fg: palette.accent, bg: inputBg }),
-        span(stateLabel, { fg: palette.accent, bold: true, bg: inputBg }),
-        ...(details ? [span(`  (${details})`, { fg: 245, bg: inputBg })] : []),
-      ];
-      drawStyledLine(buf, fieldInnerR, fieldInnerR.y, statusLine);
-      hideCursor();
+      if (field.value !== "") {
+        // User is typing a steering/queued message mid-turn — show the field.
+        const fieldTop = inputBoxY + 1;
+        drawStyledLine(buf, { x: inputInnerLeft, y: fieldTop, width: 2, height: 1 }, fieldTop, [
+          span("↳ ", { fg: palette.accent, bold: true, bg: inputBg }),
+        ]);
+        const fieldR: Rect = {
+          x: inputInnerLeft + 2, y: fieldTop,
+          width: inputInnerW - 2, height: 1,
+        };
+        lastFieldRect = fieldR;
+        field.render(buf, fieldR, { fg: "white", bg: inputBg }, { singleLine: true });
+        showCursor();
+      } else {
+        const statusLine: StyledLine = [
+          span(`${spinner.frame} `, { fg: palette.accent, bg: inputBg }),
+          span(stateLabel, { fg: palette.accent, bold: true, bg: inputBg }),
+          ...(details ? [span(`  (${details})`, { fg: 245, bg: inputBg })] : []),
+          span("  ·  ", { fg: palette.mutedFg - 3, bg: inputBg }),
+          span("esc", { fg: "white", bold: true, bg: inputBg }),
+          span(" to interrupt", { fg: 245, bg: inputBg }),
+          ...(queuedMessages.length > 0
+            ? [span(`  ·  ${queuedMessages.length} queued`, { fg: 214, bold: true, bg: inputBg })]
+            : []),
+        ];
+        drawStyledLine(buf, fieldInnerR, fieldInnerR.y, statusLine);
+        hideCursor();
+      }
     } else {
       // Prompt glyph on the first inner row; input wraps across all inner rows.
       const fieldTop  = inputBoxY + 1;
@@ -4410,14 +4910,7 @@ export async function runREPL(
       ? Math.round((lastContextSize / getContextWindow()) * 100)
       : 0;
 
-    if (isBusy) {
-      const footerLeft: StyledLine = [
-        span(spinner.frame, { fg: palette.accent }),
-        span(" esc", { fg: "white", bold: true }),
-        span(" interrupt", { fg: "gray" }),
-      ];
-      drawStyledLine(buf, footerR, footerY, footerLeft);
-    }
+    // (esc-to-interrupt hint now lives inline in the busy status line above)
 
     // (context %/tokens and ctrl+p hint live in the bottom status bar — see below)
     void totalTokInput; void ctxPctFoot;
@@ -4528,9 +5021,11 @@ export async function runREPL(
       // Active tier window — the number that actually caps this session. (The
       // old "Max Window" summed every tier's window, which no single request
       // ever gets — misleading. Show the live window instead.)
+      const maxTierWindow = Math.max(...Object.values(TIER_CONTEXT_WINDOW));
       sbKV("Window", [
         span(formatTok(ctxWindow), { fg: palette.chatFg as number | "white", bold: true }),
         span(`  ${lastTier}`, { fg: palette.mutedFg }),
+        span(`  / ${formatTok(maxTierWindow)} max`, { fg: 238 }),
       ]);
       sbKV("Used", [
         span(formatTok(ctxUsed), { fg: ctxColor, bold: true }),
@@ -4548,7 +5043,10 @@ export async function runREPL(
         sRow++;
       }
       sbKV("Remaining", tokVal(ctxRemaining));
-      sbKV("Compact at", [span(`${compactAtPct}%`, { fg: palette.mutedFg })]);
+      sbKV("Compact at", [
+        span(`${compactAtPct}%`, { fg: palette.mutedFg }),
+        span(`  (${formatTok(compactThreshold())})`, { fg: 238 }),
+      ]);
       sbKV("Processed", [
         span(formatTok(ctxProcessedSinceCompact), { fg: palette.mutedFg }),
         span(compactionCount > 0 ? `  ${compactionCount} compaction${compactionCount === 1 ? "" : "s"}` : "  since start", { fg: 238 }),
@@ -4731,9 +5229,18 @@ export async function runREPL(
 
     // Build right-side status content
     const bgRunning = [...bgTasks.values()].filter(t => t.status === "running").length;
+    const bgShells = listBackground().filter(s => !s.done).length;
     const rightLine: StyledLine = [
+      ...(connState === "offline"
+        ? [span("⚠ offline — retrying", { fg: 204, bold: true }), span("   ", {})]
+        : connState === "checking"
+          ? [span("· connecting…", { fg: 245 }), span("   ", {})]
+          : []),
       ...(bgRunning > 0
-        ? [span(`◔ ${bgRunning} bg agent${bgRunning > 1 ? "s" : ""}`, { fg: 214, bold: true }), span("   ", {})]
+        ? [span(`${spinner.frame} ${bgRunning} bg agent${bgRunning > 1 ? "s" : ""}`, { fg: 214, bold: true }), span("   ", {})]
+        : []),
+      ...(bgShells > 0
+        ? [span(`${spinner.frame} ${bgShells} bg shell${bgShells > 1 ? "s" : ""}`, { fg: 178, bold: true }), span("   ", {})]
         : []),
       span(sidebarToggleLabel, { fg: 75, bold: true }),
       span(" (Ctrl+B)", { fg: 245 }),
@@ -4834,6 +5341,7 @@ export async function runREPL(
     for (const u of unsubscribers) u();
     mcpManager.disconnectAll();
     killAllBackground();
+    killActiveToolProcesses();
     spinner.stop();
     pulse.stop();
     stopTimer();
@@ -4931,6 +5439,8 @@ export async function runREPL(
     }
     if (replState !== "idle" && replState !== "permission") {
       interrupted  = true;
+      killActiveToolProcesses(); // stop running foreground shells right away
+      queuedMessages.length = 0; // Esc means stop — don't fire queued input after
       replState    = "idle";
       streamBuffer = "";
       chatLinesDirty = true;
@@ -5077,10 +5587,66 @@ export async function runREPL(
 
   // Input submission
   field.onSubmit = (text) => {
-    if (!text.trim() || busy()) return;
+    if (!text.trim()) return;
+    if (busy()) {
+      // /btw is the side channel — it runs immediately, even mid-turn.
+      if (text.trim().startsWith("/btw")) {
+        field.clear();
+        handleSlashCommand(text.trim());
+        app.requestRender();
+        return;
+      }
+      // Queue while the agent works — steered into the turn at the next
+      // round boundary, or sent as the next turn if this one ends first.
+      queuedMessages.push(text.trim());
+      field.clear();
+      chatLinesDirty = true;
+      app.requestRender();
+      return;
+    }
     field.clear();
     void sendMessage(text);   // paste chips expanded for the model inside sendMessage
   };
+
+  /** Terminal notification (OSC9 for iTerm2/WezTerm/Ghostty/ConEmu + BEL
+   *  fallback) — fires when a long turn finishes or approval is needed, so
+   *  the user can tab away during long agent work. Control characters are
+   *  stripped so no payload can smuggle further escape sequences. */
+  function notifyTerminal(msg: string): void {
+    if (config.notifications === "off") return;
+    const clean = msg.replace(/[\x00-\x1f\x7f-]/g, " ").slice(0, 120);
+    process.stdout.write(`\x1b]9;${clean}\x07\x07`);
+  }
+
+  /** Fold a side-channel response (/btw, /advisor) into session accounting so
+   *  the sidebar, /cost, /why and the quota display stay truthful. */
+  function recordSideUsage(chunk: StreamChunk, fallbackTier: string): void {
+    if (chunk.type === "quota" && chunk.quota) { lastQuota = chunk.quota; return; }
+    if (chunk.type !== "metadata" || !chunk.usage) return;
+    const tier = chunk.metadata?.tier ?? fallbackTier;
+    totalTokens = {
+      prompt:     totalTokens.prompt     + chunk.usage.prompt_tokens,
+      completion: totalTokens.completion + chunk.usage.completion_tokens,
+    };
+    sessionCost += costUsd(chunk.usage.prompt_tokens, chunk.usage.completion_tokens, tier);
+    totalRequests++;
+    tierCounts.set(tier, (tierCounts.get(tier) ?? 0) + 1);
+    if (chunk.metadata) {
+      lastMeta  = { metadata: chunk.metadata, cost: KlaatAIClient.formatCost(chunk.metadata, chunk.usage), usage: chunk.usage };
+      lastModel = chunk.metadata.model ?? lastModel;
+      lastTier  = chunk.metadata.tier ?? lastTier;
+    }
+  }
+
+  /** Run queued input in order once the agent is free. */
+  function drainQueue(): void {
+    while (queuedMessages.length > 0 && !busy()) {
+      const next = queuedMessages.shift()!;
+      if (next.startsWith("/") && handleSlashCommand(next)) continue;
+      void sendMessage(next);
+      return; // sendMessage drains the rest when it finishes
+    }
+  }
 
   unsubscribers.push(app.onKey("enter", (ev) => {
     if (dialog.active) { dialog.handleKey(ev); return; }
@@ -5358,13 +5924,14 @@ export async function runREPL(
       return; // consume all unmatched keys in NORMAL mode
     }
 
-    if (replState === "idle") {
-      // ── @ → file picker ──────────────────────────────────────────────
-      if (ev.char === "@" && !ev.ctrl && !ev.alt) {
+    if (replState === "idle" || busy()) {
+      // ── @ → file picker (idle only — overlays don't mix with a live turn)
+      if (ev.char === "@" && !ev.ctrl && !ev.alt && replState === "idle") {
         openFilePicker();
         return; // don't insert bare @; picker inserts "@path " on select
       }
 
+      // While busy this types a queued/steering message (Claude Code-style).
       if (field.handleKey(ev, { singleLine: true })) {
         updateSlashSuggest();
         app.requestRender();
@@ -5595,8 +6162,39 @@ export async function runREPL(
 
   // ─── Start ────────────────────────────────────────────────────────────────
 
-  spinner.start(() => { if (busy()) app.requestRender(); });
+  // Keep frames ticking while background work runs so status-bar badges and
+  // live tool rows animate even when the main turn is idle.
+  const hasLiveBackground = () =>
+    [...bgTasks.values()].some(t => t.status === "running") ||
+    listBackground().some(s => !s.done);
+  // Running-row animation: a full transcript rebuild per 80ms tick is too
+  // costly on long sessions, so step the animated rows at ~3Hz instead.
+  let _animTick = 0;
+  spinner.start(() => {
+    _animTick++;
+    if (runningToolCount > 0 && _animTick % 4 === 0) chatLinesDirty = true;
+    if (busy() || runningToolCount > 0 || hasLiveBackground()) app.requestRender();
+  });
   pulse.start(() => { if (busy()) app.requestRender(); });
+
+  // Connectivity probe — REPL opens instantly; ping runs here in the
+  // background and the status bar shows a badge until we're online.
+  // While offline, retry every 10s; a successful chat round also proves
+  // connectivity, so this loop only matters for the idle case.
+  void (async () => {
+    while (!_quitting) {
+      try {
+        await client.ping(8_000);
+        connState = "online";
+        app.requestRender();
+        return;
+      } catch {
+        if (_quitting) return;
+        if (connState !== "offline") { connState = "offline"; app.requestRender(); }
+        await new Promise((r) => setTimeout(r, 10_000));
+      }
+    }
+  })();
 
   // Fetch lifetime stats in background (non-blocking — sidebar shows "Fetching…" until done)
   void fetchLifetimeStats();
@@ -5655,9 +6253,11 @@ export async function runREPL(
   // and new turns append to it instead of forking a duplicate session.
   if (opts.resumeId) {
     if (resumeTarget) {
-      const { msgs, apiMsgs } = loadSessionFromFile(resumeTarget.file);
+      const { msgs, apiMsgs, stats } = loadSessionFromFile(resumeTarget.file);
       messages.splice(0, messages.length, ...msgs);
       apiMessages = [...apiMessages.slice(0, apiMessages.findIndex(m => m.role !== "system") || 1), ...apiMsgs];
+      lastContextSize = estimateContextTokens(apiMessages);
+      restoreSessionStats(stats);
       chatLinesDirty = true;
       chatAutoScroll = true;
       pushSystemMsg(`Resumed session **${resumeTarget.id}** — ${msgs.length} messages loaded.`);

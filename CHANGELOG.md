@@ -5,6 +5,48 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); version
 
 ## [Unreleased]
 
+### Added (quick wins from competitor research)
+
+- **Cost receipt on every turn** — the end-of-turn summary now carries the money: `Read 3 files · 2 edits · ran 2 commands · $0.033 · saved $0.29 vs frontier · 34s` (frontier baseline = titan rates on the same tokens). `/cost` gains a "Last turn (receipt)" block: cost, per-tier request mix, tokens in/out (+cached), duration. Pinning a premium tier (`/tier reason|heavy|titan`) shows an honest pre-flight estimate before the turn runs; auto-routed turns are never estimated (the server picks the tier per request, so a number would be a guess).
+- **Side-channel accounting** — `/btw` and `/advisor` responses now register in session accounting: request count, per-tier tally, `/why` metadata (served model/tier), quota snapshot, and cost computed from the tier the server actually served (was hardcoded to the requested tier). Previously they were invisible — sidebar showed zero requests and `/why` said "No request made yet" after a successful consult.
+- **`/advisor` heavy-tier timeout fix** — heavy responses are still server-buffered until the A2 deploy, so the consult now uses a 120s response-header timeout (`connectTimeoutMs` option on `chatStream`) instead of the 45s default that made it fail with "Timed out waiting for the model".
+- **`/advisor` (Oracle-style consult)** — one command escalates to the heavy tier for a senior-engineer review of the current approach: it reads a condensed transcript, streams sharp guidance into an `⚖ advisor` block, and feeds the advice back into the conversation so the main agent applies it next turn. `/advisor <specific question>` to direct it.
+- **`/security-review`** — security-focused preset over `/review` (injection, authz, secrets, SSRF, deserialization, traversal, XSS, races, dependency risk).
+- **`/add-dir <path>`** — session-scoped extra working directory: extends the write sandbox and informs the agent.
+- **`/btw` side channel** — ask a quick side question any time, even mid-turn: answered immediately on the fast tier in its own `↷ btw` transcript block, streaming live. The main conversation, its context, and the running turn are completely untouched (nothing enters `apiMessages`).
+- **Type while the agent works (steering + queue)** — input stays live during a turn; Enter queues the message, and non-slash messages are injected into the running turn at the next round boundary so the model course-corrects mid-task (Claude Code-style). Slash commands and leftovers run in order after the turn. Queued items show as `↳ queued` chips; Esc interrupt clears the queue.
+- **/review presets** — `/review` (uncommitted), `/review base <branch>` (branch vs merge-base), `/review commit <sha>`, `/review <ref|range>`, or `/review <free text>` as a custom focus. Findings ordered by severity.
+- **Terminal notifications** — OSC9 + bell when a >15s turn finishes or the agent needs approval, so you can tab away. `notifications: "off"` in config disables.
+- **Layered AGENTS.md discovery** — global `~/.klaatai/AGENTS.md`, then git root → cwd chain (per-dir first match of `.klaatai/rules.md` → `AGENTS.md` → `CLAUDE.md`), concatenated root-first with closer files winning, capped at 32KiB. Matches the emerging industry semantics.
+- **Durable command rules on "always allow"** — approving a command with "always" now stores a two-token prefix rule per chained sub-command (`bun test *`, `git push *`) instead of the exact string, so the next variation doesn't re-prompt.
+
+### Security
+
+- **`/review` argument injection closed** — ref arguments are validated (no leading `-`, ref-safe charset) before reaching git argv; flag-like or multi-word input is treated as a review focus and never touches git (blocks e.g. `/review --output=<file>`).
+- **Terminal notification sanitization** — OSC9 payloads strip C0/C1 control characters and DEL, so no message content can smuggle further escape sequences.
+- **Shell-chain permission bypass fixed** — allowlist patterns like `cat *` previously glob-matched the whole command string, so `cat x; sudo rm -rf /` auto-passed. Commands are now split on `&&`/`||`/`;`/`|` (quote-aware) and every sub-command must pass the allowlist on its own; commands with redirects/substitution/backgrounding are opaque and only match exact allowlist entries. Deny list checks both the whole string and each sub-command. Covered by new `src/permissions/index.test.ts`.
+
+### Fixed
+
+- **TUI froze during long shell commands** — foreground `run_command` (and `grep`) used `spawnSync`, which blocks the entire event loop: no spinner, no rendering, no Esc until the command finished (up to its timeout). Both now run async with a 10MB output cap; the UI stays live and animated throughout.
+- **Esc now actually stops running commands** — interrupt kills the whole process group (not just `sh`, whose orphaned children previously kept the pipe open and the round hung until their natural exit). Kill latency measured ~300ms; the tool result is marked `[killed …]` so the model knows.
+- **Auth refresh can no longer hang or force needless re-login at boot** — the Supabase refresh call now has an 8s timeout, and a *network* failure (offline/slow) falls back to the stored access token instead of returning null and triggering browser OAuth; only a genuinely rejected refresh token (4xx) demands re-login. The 401 recovery path retries once online.
+
+### Changed
+
+- **Instant startup** — boot no longer blocks on a network ping gate (up to ~27s on flaky networks) or artificial splash delays (~1.5s of `sleep`s on every launch). The REPL opens immediately after credential load; connectivity is probed in the background and surfaces as a status-bar badge (`· connecting…` / `⚠ offline — retrying`, auto-retry every 10s).
+
+### Added
+
+- **Live tool group** — running tool calls now appear in the transcript the moment they start, as one Claude Code-style aggregate line with a pulsating dot ("● Reading 1 file, running 2 shell commands…") and a ⎿ detail line per call. Calls leave the group and become normal ⏺ result rows as each one finishes.
+- **Claude-style busy status line** — the input-area status now shows the real activity ("Reading 1 file, running 2 shell commands… (1m 40s · ↓ 6.2k tokens) · esc to interrupt") instead of a bare whimsy verb; the redundant footer "esc interrupt" line is merged into it. `grep` now skips node_modules/.git/dist/lockfiles/tsbuildinfo by default.
+- **Session counters survive resume** — a cumulative usage snapshot (requests, tokens, cost) is appended to the session file each turn; resuming restores the sidebar Session block instead of showing zeros.
+- **Turn activity summary** — after a multi-tool turn, one dim line tallies the work: `Read 3 files · 2 edits · ran 2 commands · 34s`.
+- **Background shell badge** — the status bar now shows running background shells (`⚙ N bg shells`) alongside the existing bg-agent badge, with an animated spinner while any background work is live.
+- **Path-guessing guard** — "File not found" errors from read/edit tools now include a listing of the nearest existing directory plus an explicit "do not guess" instruction, and the system prompt forbids reading paths never seen in a listing/search result (kills the observed loop of models inventing conventional paths like `src/app/dashboard/page.tsx` and retrying variations). MCP tools that overlap with built-ins are now explicitly deprioritized in the prompt.
+- **Context meter survives resume** — after `/resume` (or `klaatcode -r`) the context gauge shows an estimate of the restored transcript instead of 0; the server's real count replaces it on the first request. MCP tool names render as `mcp:server tool` instead of `Mcp__server__tool`.
+- **Session self-awareness** — the agent now knows who is logged in (account email, backend URL, CLI version, from the Environment block) and answers "what account am I connected to?"-style questions directly instead of exploring the project's .env/config files. New `/whoami` slash command shows account, plan, backend, version, and connectivity.
+
 ## [2.3.5] — 2026-07-30
 
 ### Fixed

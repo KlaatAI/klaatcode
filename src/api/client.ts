@@ -541,6 +541,9 @@ export class KlaatAIClient {
       tier?: string;
       /** Task-shape hint (D4): plan|edit|search|summarize. */
       task?: "plan" | "edit" | "search" | "summarize";
+      /** Response-header timeout override. Heavy/titan consults need more than
+       *  the 45s default while the server still buffers those tiers. */
+      connectTimeoutMs?: number;
     } = {}
   ): AsyncGenerator<StreamChunk> {
     const reqHeaders: Record<string, string> = {};
@@ -564,7 +567,7 @@ export class KlaatAIClient {
 
     let res: Response;
     try {
-      res = await this.postWithConnectTimeout(target.url, target.headers, payload);
+      res = await this.postWithConnectTimeout(target.url, target.headers, payload, opts.connectTimeoutMs);
     } catch (err) {
       const aborted = err instanceof Error && err.name === "AbortError";
       yield {
@@ -578,7 +581,7 @@ export class KlaatAIClient {
 
     // 401 auto-recovery is a Klaatu-auth flow — custom endpoints get no retry.
     if (res.status === 401 && !this._custom && await this.tryRecoverAuth()) {
-      res = await this.postWithConnectTimeout(target.url, this.headers(reqHeaders), payload);
+      res = await this.postWithConnectTimeout(target.url, this.headers(reqHeaders), payload, opts.connectTimeoutMs);
     }
 
     // Honor the server retry contract (D6): X-KlaatAI-Retry "no" = the cascade
@@ -589,7 +592,7 @@ export class KlaatAIClient {
       const waitMs = KlaatAIClient.retryDelayMs(res.headers, res.status);
       if (waitMs !== null && waitMs <= 60_000) {
         await new Promise(r => setTimeout(r, waitMs));
-        res = await this.postWithConnectTimeout(target.url, this.headers(reqHeaders), payload);
+        res = await this.postWithConnectTimeout(target.url, this.headers(reqHeaders), payload, opts.connectTimeoutMs);
       }
     }
 
