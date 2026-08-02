@@ -7,6 +7,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); version
 
 ### Added
 
+- **Headless exec contract (`klaatai run` for CI/automation)** — `run` is now a real agentic loop (tools, multi-round) with a machine-facing contract, so scripts and CI can drive it reliably:
+  - `--json` emits a JSONL event stream (`start` / `tool` / `turn` / `cost` / `result`) instead of prose.
+  - `--output-schema <file>` forces the final answer to match a JSON Schema (validated client-side, one corrective retry, exit 2 on mismatch) — reliable structured output that's model-agnostic (no server support needed).
+  - `--output-last-message <file>` writes just the final answer/JSON to a file.
+  - `--allow-tools <spec>` bounds autonomy by category (`read,edit,shell,search,web,all,none`) or explicit tool name; `--no-tools` is pure chat; `--max-turns <n>` caps rounds.
+  - Deterministic exit codes: `0` ok · `1` auth/error · `2` task failed (or schema mismatch) · `3` `--max-cost` reached · `4` needed approval.
+  - Ships a composite **GitHub Action** (`.github/actions/klaatai`) that installs the CLI and passes the API key by env only (never a CLI arg, so it can't leak into process listings or tool output). All server-side unchanged — same `/v1/chat/completions`. Contract logic (schema validation, JSON extraction) unit-tested in `src/agent/headless-contract.test.ts`.
+
 - **Proof-of-work verification (`/verify` + auto)** — the agent can now *prove* an edit works instead of just claiming it. `/verify` detects the project's typecheck + test commands (Bun/Vitest/Jest/pytest/Go/Cargo/npm; `tsc --noEmit`, `cargo check`, or a `typecheck` script), runs them, and posts a pass/fail receipt: `✓ Verified — ✓ typecheck · ✓ Bun` or `✗ Verification failed …` with the actual error. Pairs with the cost receipt — every turn can now show both what it cost and that it works.
   - **Auto mode with an in-CLI picker** — `/verify auto` opens a selector (Off / Types only / Full) that saves straight to config, no hand-editing. When on, verification runs after any turn that edits files.
   - **No false blame** — auto mode correlates failures with the files the turn actually touched. A project that was already failing typecheck reads as "✓ your changes look clean — issues only in files you didn't touch (pre-existing)", and only genuinely introduced failures are fed back to the agent to fix. (Fixes the first-run experience of pointing it at a repo with pre-existing errors.)

@@ -1,0 +1,64 @@
+name: "KlaatAI Agent"
+description: "Run a KlaatAI (klaatcode) agent task headlessly in CI — review, fix, or answer with a structured result."
+author: "KlaatAI"
+branding:
+  icon: "cpu"
+  color: "purple"
+
+inputs:
+  prompt:
+    description: "The task for the agent."
+    required: true
+  api-key:
+    description: "KlaatAI API key. Store as a secret and pass ${{ secrets.KLAATAI_API_KEY }}."
+    required: true
+  allow-tools:
+    description: "Tool allowlist (read,edit,shell,search,web,all,none). Default read,edit,shell."
+    required: false
+    default: "read,edit,shell"
+  max-cost:
+    description: "Hard USD budget for the run. Exit code 3 if reached."
+    required: false
+    default: "0.50"
+  model:
+    description: "Force a routing tier (nano/fast/code/reason/heavy/titan)."
+    required: false
+    default: ""
+  output-schema:
+    description: "Path to a JSON Schema file the final answer must match."
+    required: false
+    default: ""
+
+outputs:
+  result:
+    description: "The agent's final answer (or validated JSON)."
+    value: ${{ steps.run.outputs.result }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install Bun
+      uses: oven-sh/setup-bun@v2
+      with:
+        bun-version: latest
+    - name: Install klaatcode
+      shell: bash
+      run: bun add -g klaatai
+    - name: Run agent
+      id: run
+      shell: bash
+      # The API key is passed via env only — never as a CLI arg (so it can't
+      # leak into process listings or the agent's own tool output).
+      env:
+        KLAATAI_API_KEY: ${{ inputs.api-key }}
+      run: |
+        set -o pipefail
+        ARGS=(--output-last-message /tmp/klaatai-result.txt --max-cost "${{ inputs.max-cost }}" --allow-tools "${{ inputs.allow-tools }}")
+        [ -n "${{ inputs.model }}" ] && ARGS+=(--model "${{ inputs.model }}")
+        [ -n "${{ inputs.output-schema }}" ] && ARGS+=(--output-schema "${{ inputs.output-schema }}")
+        klaatai run "${{ inputs.prompt }}" "${ARGS[@]}"
+        {
+          echo "result<<KLAATAI_EOF"
+          cat /tmp/klaatai-result.txt
+          echo "KLAATAI_EOF"
+        } >> "$GITHUB_OUTPUT"
