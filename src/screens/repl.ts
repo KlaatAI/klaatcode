@@ -73,7 +73,8 @@ import { readClipboardImage, MAX_IMAGE_BYTES } from "../utils/clipboard-image.js
 import { SessionLedger } from "../agent/session-ledger.js";
 import { COMPACTION_PROMPT, extractSummary, MAX_CONSECUTIVE_COMPACT_FAILURES } from "../agent/compaction-prompt.js";
 import { compactMessagesForApi } from "../agent/compaction.js";
-import { stripStrayTextToolCallArtifacts } from "../agent/text-tool-artifacts.js";
+import { stripStrayTextToolCallArtifacts, maskTextToolXmlForDisplay } from "../agent/text-tool-artifacts.js";
+import { looksLikeUnfulfilledActionPromise } from "../agent/action-promise.js";
 import { drawWelcomeCard } from "./welcome-card.js";
 import {
   renderSessionMarkdown,
@@ -3600,6 +3601,11 @@ export async function runREPL(
       // connections). Refills each round that makes progress.
       let streamRetries = 0;
       const MAX_STREAM_RETRIES = 1;
+      // Promise-without-action guard: rounds that narrate "I'll fix it now"
+      // with zero tool calls get up to this many nudge rounds to actually act
+      // before the turn is allowed to end (weak fast/vision-tier models).
+      let actionNudges = 0;
+      const MAX_ACTION_NUDGES = 2;
 
       outerLoop: while (true) {
         if (interrupted) break outerLoop;
@@ -3673,7 +3679,11 @@ export async function runREPL(
               }
               replState     = "streaming";
               fullText     += chunk.text ?? "";
-              streamBuffer  = fullText;
+              // Hold back text-protocol tool-call XML while it streams — the
+              // server parses/strips it at stream end, but the raw block must
+              // never render as the visible answer (fullText keeps the raw
+              // text for history/parsing).
+              streamBuffer  = maskTextToolXmlForDisplay(fullText);
               chatLinesDirty = true;
               chatAutoScroll = true;
               app.requestRender();
@@ -4065,6 +4075,56 @@ export async function runREPL(
           // 9.5: reclassify the agent phase from this round's tools.
           phaseTracker.noteTools(pendingToolCalls.map(t => t.function.name));
           continue;
+        }
+
+        // Promise-without-action guard: no tool calls this round, but the
+        // text announces work ("I'll rewrite the scene now. One moment —").
+        // Ending the turn here is the "says it will fix it, does nothing"
+        // bug: keep the narration, demand the action, run one more round.
+        {
+          const promisedText = stripStrayTextToolCallArtifacts(
+            (fullText || "").replace(/<(?:thinking|reasoning)>[\s\S]*?<\/(?:thinking|reasoning)>/g, "")
+          ).trim();
+          if (
+            !interrupted && !planMode && !opts.noTools && tools.length > 0 &&
+            actionNudges < MAX_ACTION_NUDGES && !budgetStop &&
+            looksLikeUnfulfilledActionPromise(promisedText)
+          ) {
+            actionNudges++;
+            const am: ChatMessage = {
+              role: "assistant", content: promisedText,
+              model: lastModel, tier: lastTier, elapsed,
+            };
+            messages.push(am);
+            appendSessionMsg({ role: "assistant", content: promisedText });
+            messages.push({
+              role: "system",
+              content: `↻ Model promised an action but called no tools — nudging it to act (${actionNudges}/${MAX_ACTION_NUDGES}).`,
+            });
+            // E3: a narrated no-op is a model-quality signal the router can use.
+            if (lastMeta?.metadata.model) {
+              client.queueFeedback({
+                model_id: lastMeta.metadata.model, error_type: "tool_validation",
+                tier: lastMeta.metadata.tier, detail: "promised_action_no_tool_call",
+              });
+            }
+            currentApiMessages = [
+              ...currentApiMessages,
+              { role: "assistant", content: promisedText },
+              {
+                role: "system",
+                content:
+                  "You announced an action but ended your turn without calling any tool — " +
+                  "nothing was executed and no files changed. Do NOT restate the plan. Call " +
+                  "the tool(s) that perform the first concrete step NOW (edit_file / " +
+                  "write_file / run_command / …). If you are blocked on a decision, call " +
+                  "ask_user instead.",
+              },
+            ];
+            chatLinesDirty = true;
+            app.requestRender();
+            continue;
+          }
         }
         break;
       }
