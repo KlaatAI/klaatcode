@@ -544,6 +544,9 @@ export class KlaatAIClient {
       /** Response-header timeout override. Heavy/titan consults need more than
        *  the 45s default while the server still buffers those tiers. */
       connectTimeoutMs?: number;
+      /** Max gap between streamed chunks before the stream is treated as
+       *  stalled (socket open, no bytes). Default 90s; 0 disables. */
+      idleTimeoutMs?: number;
     } = {}
   ): AsyncGenerator<StreamChunk> {
     const reqHeaders: Record<string, string> = {};
@@ -616,6 +619,34 @@ export class KlaatAIClient {
     const decoder = new TextDecoder();
     let buffer = "";
 
+    // Idle watchdog: a silent stall (socket stays open but no bytes arrive —
+    // LB holding the connection, model hung) makes reader.read() never resolve,
+    // hanging the turn forever. Race each read against an idle timer; a stall
+    // throws into the same salvage path as a socket drop. The FIRST body read
+    // gets a longer allowance (buffered tiers — reason/heavy/titan — send
+    // nothing until the whole completion is ready); the tight idle gap only
+    // applies between chunks once streaming has actually begun.
+    const idleMs = opts.idleTimeoutMs ?? 90_000;
+    const firstByteMs = Math.max(idleMs, opts.connectTimeoutMs ?? 45_000);
+    let firstBodyRead = true;
+    const readWithIdleTimeout = async (): Promise<ReadableStreamReadResult<Uint8Array>> => {
+      const limit = firstBodyRead ? firstByteMs : idleMs;
+      firstBodyRead = false;
+      if (limit <= 0) return reader.read();
+      let stalled = false;
+      const timer = setTimeout(() => { stalled = true; reader.cancel().catch(() => {}); }, limit);
+      try {
+        const result = await reader.read();
+        // Deterministic: if the watchdog fired, treat as a stall regardless of
+        // whether cancel() resolved the read as done first (avoids a silent
+        // clean-end racing the intended transient error → retry).
+        if (stalled) throw new Error(`Connection stalled — no data for ${Math.round(limit / 1000)}s`);
+        return result;
+      } finally {
+        clearTimeout(timer);
+      }
+    };
+
     // Accumulate tool-call fragments by index. Works for BOTH:
     //  - one delta carrying a complete tool call (Klaatu today), and
     //  - OpenAI-style fragmented deltas (id+name first, arguments streamed).
@@ -642,9 +673,10 @@ export class KlaatAIClient {
       let done: boolean;
       let value: Uint8Array | undefined;
       try {
-        ({ done, value } = await reader.read());
+        ({ done, value } = await readWithIdleTimeout());
       } catch (err) {
-        // Mid-stream socket drop (flaky wifi, proxy/LB idle-timeout, VPN).
+        // Mid-stream socket drop (flaky wifi, proxy/LB idle-timeout, VPN) OR
+        // a silent stall caught by the idle watchdog above.
         // Bun surfaces this as a raw "The socket connection was closed
         // unexpectedly" fetch error. Letting it escape aborted the whole turn
         // with an opaque message and no way to keep the partial answer, so

@@ -66,6 +66,10 @@ export interface Config {
   /** Terminal notifications (OSC9 + bell) when a long turn finishes or the
    *  agent needs approval: "on" (default) or "off". */
   notifications?: "on" | "off";
+  /** Proof-of-work verify after a turn that edited files:
+   *  "off" (default), "types" (typecheck only — fast), "full" (typecheck + tests).
+   *  `/verify` always runs the full check on demand regardless of this. */
+  verify?: "off" | "types" | "full";
   /** Cross-tool compatibility toggles. */
   compat?: {
     /** Discover skills from ~/.claude/skills and .claude/skills (default: true). */

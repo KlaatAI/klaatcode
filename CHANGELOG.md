@@ -5,6 +5,34 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); version
 
 ## [Unreleased]
 
+### Added
+
+- **Proof-of-work verification (`/verify` + auto)** — the agent can now *prove* an edit works instead of just claiming it. `/verify` detects the project's typecheck + test commands (Bun/Vitest/Jest/pytest/Go/Cargo/npm; `tsc --noEmit`, `cargo check`, or a `typecheck` script), runs them, and posts a pass/fail receipt: `✓ Verified — ✓ typecheck · ✓ Bun` or `✗ Verification failed …` with the actual error. Pairs with the cost receipt — every turn can now show both what it cost and that it works.
+  - **Auto mode with an in-CLI picker** — `/verify auto` opens a selector (Off / Types only / Full) that saves straight to config, no hand-editing. When on, verification runs after any turn that edits files.
+  - **No false blame** — auto mode correlates failures with the files the turn actually touched. A project that was already failing typecheck reads as "✓ your changes look clean — issues only in files you didn't touch (pre-existing)", and only genuinely introduced failures are fed back to the agent to fix. (Fixes the first-run experience of pointing it at a repo with pre-existing errors.)
+  - Detection, summary, and failing-file extraction are unit-tested (`src/agent/verify.test.ts`).
+
+### Internal
+
+- **repl.ts split, step 1** — the pure presentation helpers (cost/label formatting, tier-clamp parsing, shell/path syntax highlighting, rotating status verbs and tips) moved to `src/screens/repl-format.ts`, which is now independently unit-tested (`repl-format.test.ts`). No behavior change; first safe slice of the Phase 0.3 decomposition. The deep-closure functions (render/handleSlashCommand/sendMessage) remain in place pending the dedicated ReplContext refactor.
+
+### Fixed
+
+- **Mid-stream stall no longer hangs the turn forever** — the client already salvaged a socket *error*, but a silent stall (socket stays open, zero bytes — a load balancer holding the connection or a hung model) left `reader.read()` pending indefinitely with no spinner progress and no way out but Ctrl+C. An idle watchdog now races each read: the first body read gets a generous allowance (buffered reason/heavy/titan tiers send nothing until the whole completion is ready), and once streaming begins a 90s gap between chunks is treated as a stall — routed into the existing salvage path (partial output preserved) and surfaced as a transient error, which the turn auto-retries once. Deterministic (no cancel/reject race). Configurable via `idleTimeoutMs`.
+- **Timeout / dropped-connection UX** — a mid-turn stream error no longer dumps a raw red `Error: Timed out waiting for the model to respond`. Transient drops (timeout, network, 502/503/504) now auto-retry once silently; if it still fails, any partial answer that already streamed is preserved, the message is friendly and actionable ("Your message is still here — press Enter to resend"), and your text is put back in the composer for a one-key resend. Buffered tiers (reason/heavy/titan, which hold the whole completion server-side until the A2 streaming deploy) now get a 180s first-byte timeout instead of the 45s default, so long turns stop timing out in the first place.
+
+### Added
+
+- **Time travel (`/rewind`, Esc-Esc)** — press Esc twice on an empty prompt (or run `/rewind`) to fork the conversation at any earlier message: the transcript and API history truncate to that point, every file the rewound turns modified is restored to its pre-turn state (new files are removed; per-turn pre-write snapshots are captured automatically, including subagent writes), the session file is rewritten so resume follows the new branch, and your original message lands back in the input for editing. The picker shows each message with how many files a rewind would restore.
+
+### Fixed
+
+- **Weak-model "I can't run commands" denials** — some cheap-tier models occasionally claim they have no filesystem/shell access despite receiving tool schemas. Three-layer fix: the system prompt now explicitly forbids that claim, the response is auto-detected and reported to routing health (`tool_validation` feedback, so the model demotes server-side), and the user gets an immediate hint (retry or `/tier code`). Side-channel calls (`/btw`, `/advisor`) also no longer overwrite the main conversation's tier/model state, which could subtly shift the dialect and window between turns.
+
+- **Clipboard image paste now "just works"** — the ctrl+v machinery existed but the common flows missed it: cmd+v with an image-only clipboard produces an *empty* terminal paste on many emulators (now falls through to the OS clipboard image reader automatically), Finder/Explorer copies that paste as `file://` URLs are now resolved, and a new `/paste` command covers terminals that swallow ctrl+v entirely (Windows Terminal, some tmux setups). Input placeholder now advertises the shortcut.
+
+## [2.4.0] — 2026-07-31
+
 ### Added (quick wins from competitor research)
 
 - **Cost receipt on every turn** — the end-of-turn summary now carries the money: `Read 3 files · 2 edits · ran 2 commands · $0.033 · saved $0.29 vs frontier · 34s` (frontier baseline = titan rates on the same tokens). `/cost` gains a "Last turn (receipt)" block: cost, per-tier request mix, tokens in/out (+cached), duration. Pinning a premium tier (`/tier reason|heavy|titan`) shows an honest pre-flight estimate before the turn runs; auto-routed turns are never estimated (the server picks the tier per request, so a number would be a guess).

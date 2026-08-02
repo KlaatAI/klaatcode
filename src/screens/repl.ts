@@ -86,7 +86,12 @@ import {
   TIER_COLOR_MAP, KLAATU_MODEL_MAP, formatTok, formatElapsed,
   tierUnitCostLabel, unitsScaleWithSize,
 } from "./tiers.js";
+import {
+  fmtUsd, runningPhrase, parseClamp, describeClamp, highlightCommand, highlightPath,
+  THINKING_VERBS, WRITING_VERBS, PLACEHOLDER_TIPS, META_TIPS,
+} from "./repl-format.js";
 import { getPersona, PERSONAS } from "../agent/personas.js";
+import { detectVerifyCommands, runCheck, summarizeChecks, extractFailingFiles, type CheckResult } from "../agent/verify.js";
 import { version as APP_VERSION } from "../../package.json";
 import { MCP_PRESETS, getMCPPreset } from "../mcp/presets.js";
 import {
@@ -148,151 +153,6 @@ interface FileChange {
   additions: number;
   deletions: number;
 }
-
-// ─── Constants ────────────────────────────────────────────────────────────────
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-/**
- * Parse a tier change out of x_klaatai.reason. Two server markers:
- *   `hint_clamped:heavy->code(plan:free)` — the tier you asked for isn't on your plan (D3)
- *   `plan_enforced:heavy->reason`         — you hit that tier's daily/monthly cap
- * Returns null when the served tier matched the request (nothing to explain).
- */
-/** Cost formatting: enough precision to be honest at sub-cent scale. */
-function fmtUsd(v: number): string {
-  return "$" + (v >= 0.1 ? v.toFixed(2) : v >= 0.01 ? v.toFixed(3) : v.toFixed(4));
-}
-
-/** "Reading 2 files, running 1 shell command" — aggregate label for the live tool group. */
-function runningPhrase(names: string[]): string {
-  const b = { read: 0, edit: 0, cmd: 0, search: 0, agent: 0, web: 0, other: 0 };
-  for (const n of names) {
-    if (n === "read_file") b.read++;
-    else if (["write_file", "edit_file", "multi_edit", "apply_patch"].includes(n)) b.edit++;
-    else if (n === "run_command") b.cmd++;
-    else if (["grep", "glob", "list_dir", "file_outline", "project_graph_query", "project_semantic_search"].includes(n)) b.search++;
-    else if (n === "delegate_task") b.agent++;
-    else if (n === "web_fetch" || n === "web_search") b.web++;
-    else b.other++;
-  }
-  const s = (k: number) => (k > 1 ? "s" : "");
-  const parts: string[] = [];
-  if (b.read)   parts.push(`reading ${b.read} file${s(b.read)}`);
-  if (b.edit)   parts.push(`editing ${b.edit} file${s(b.edit)}`);
-  if (b.cmd)    parts.push(`running ${b.cmd} shell command${s(b.cmd)}`);
-  if (b.search) parts.push(`searching (${b.search})`);
-  if (b.agent)  parts.push(`${b.agent} agent${s(b.agent)} working`);
-  if (b.web)    parts.push(`fetching from the web (${b.web})`);
-  if (b.other)  parts.push(`${b.other} tool call${s(b.other)}`);
-  const joined = parts.join(", ") || "working";
-  return joined[0]!.toUpperCase() + joined.slice(1);
-}
-
-function parseClamp(reason?: string): {
-  from: string; to: string; why?: string; kind: "plan" | "cap";
-} | null {
-  if (!reason) return null;
-  const clamp = reason.match(/hint_clamped:(\w+)->(\w+)(?:\(([^)]*)\))?/);
-  if (clamp && clamp[1] !== clamp[2]) {
-    return { from: clamp[1]!, to: clamp[2]!, why: clamp[3], kind: "plan" };
-  }
-  const cap = reason.match(/plan_enforced:(\w+)->(\w+)/);
-  if (cap && cap[1] !== cap[2]) {
-    return { from: cap[1]!, to: cap[2]!, kind: "cap" };
-  }
-  return null;
-}
-
-/** One-line explanation of a tier change — what was asked, what served, why, when it resets. */
-function describeClamp(c: { from: string; to: string; why?: string; kind: "plan" | "cap" }): string {
-  const from = tierLabel(c.from) || c.from;
-  const to = tierLabel(c.to) || c.to;
-  if (c.kind === "cap") {
-    return `${from} limit reached — served on ${to} instead. Limits reset ${monthlyResetLabel()} (daily ones at midnight UTC).`;
-  }
-  const why = c.why ? ` (${c.why})` : "";
-  return `${from} isn't available on your plan${why} — served on ${to}.`;
-}
-
-// Rotating status verbs — one step every 3s of elapsed time.
-const THINKING_VERBS = [
-  "Thinking", "Pondering", "Scheming", "Brewing", "Mulling", "Conjuring",
-  "Deliberating", "Percolating", "Noodling", "Crunching", "Weaving", "Cooking",
-];
-const WRITING_VERBS = ["Writing", "Composing", "Generating", "Drafting"];
-
-// Placeholder tips — rotate while the input is empty so features get discovered.
-const PLACEHOLDER_TIPS = [
-  'Ask anything… "Fix the TODO in main.ts"',
-  'Try "@" to reference a file',
-  'Try "!" to run a shell command',
-  "Ctrl+P — command palette · /help — all commands",
-  '"/agents" — parallel sub-agents · "/model" — routing tier',
-  '"/review" — AI code review of your git diff',
-  "Ctrl+R — search input history",
-];
-
-// Syntax-highlight a shell command into colored spans for the permission card.
-function highlightCommand(cmd: string, maxW: number): Span[] {
-  const parts = cmd.split(/(\s+)/);
-  const spans: Span[] = [];
-  let isFirst = true;
-  let totalW = 0;
-
-  for (const part of parts) {
-    if (totalW >= maxW) break;
-    if (/^\s+$/.test(part)) {
-      spans.push(span(part, {}));
-      totalW += part.length;
-      continue;
-    }
-    let fg: number | string;
-    if (isFirst) {
-      fg = 114; // green — command name
-      isFirst = false;
-    } else if (part.startsWith("-")) {
-      fg = 222; // yellow — flags
-    } else if (part.startsWith("/") || part.startsWith("~") || part.startsWith("./") || part.includes("/")) {
-      fg = 81; // cyan — paths
-    } else if (part.startsWith("http://") || part.startsWith("https://")) {
-      fg = 81; // cyan — URLs
-    } else if (/^[0-9]+$/.test(part)) {
-      fg = 176; // purple — numbers
-    } else if (part.startsWith("$") || part.startsWith("\"") || part.startsWith("'")) {
-      fg = 215; // orange — variables/strings
-    } else {
-      fg = 252; // default light
-    }
-    const display = totalW + part.length > maxW ? part.slice(0, maxW - totalW - 1) + "…" : part;
-    spans.push(span(display, { fg }));
-    totalW += display.length;
-  }
-  return spans;
-}
-
-// Syntax-highlight a file path: directory parts dim, filename bright.
-function highlightPath(filePath: string, maxW: number): Span[] {
-  const truncated = filePath.length > maxW ? "…" + filePath.slice(filePath.length - maxW + 1) : filePath;
-  const lastSlash = truncated.lastIndexOf("/");
-  if (lastSlash < 0) return [span(truncated, { fg: "white", bold: true })];
-  return [
-    span(truncated.slice(0, lastSlash + 1), { fg: 245 }),
-    span(truncated.slice(lastSlash + 1), { fg: "white", bold: true }),
-  ];
-}
-
-// Right-side tips below input — short actionable hints, rotate every 8s.
-const META_TIPS = [
-  "tip: @ to attach files",
-  "tip: /compact to free context",
-  "tip: Ctrl+B toggle sidebar",
-  "tip: /tier heavy for complex tasks",
-  "tip: /clear to reset session",
-  "tip: /cost to see usage stats",
-  "tip: /theme to change colors",
-  "tip: /undo to revert last edit",
-];
 
 // ─── runREPL ──────────────────────────────────────────────────────────────────
 
@@ -372,6 +232,31 @@ export async function runREPL(
 
   // ─── Theme picker (interactive selector with live preview) ─────────────────
   let themePicker: { cursor: number } | null = null;
+
+  // Auto-verify mode picker (off / types / full) — set from the REPL, saved to config.
+  const VERIFY_OPTIONS: { value: "off" | "types" | "full"; label: string; desc: string }[] = [
+    { value: "off",   label: "Off",         desc: "No automatic checks (run /verify manually)" },
+    { value: "types", label: "Types only",  desc: "Typecheck after any turn that edits files — fast" },
+    { value: "full",  label: "Full",        desc: "Typecheck + tests after edits — strongest proof" },
+  ];
+  let verifyPicker: { cursor: number } | null = null;
+
+  // ── Time travel (9.10) ─────────────────────────────────────────────────────
+  // One checkpoint per user turn: transcript/api lengths at turn start plus the
+  // PRE-WRITE content of every file the turn mutates (captured lazily on first
+  // write; null = file didn't exist). Esc-Esc opens the rewind picker; forking
+  // truncates the conversation there, restores files, and prefills the input.
+  interface TurnCheckpoint {
+    msgLen: number;
+    apiLen: number;
+    userText: string;
+    at: number;
+    files: Map<string, string | null>;
+  }
+  const turnCheckpoints: TurnCheckpoint[] = [];
+  let activeTurnCheckpoint: TurnCheckpoint | null = null;
+  let rewindPicker: { cursor: number } | null = null;
+  let lastEscapeAt = 0;
 
   let totalTokens:  { prompt: number; completion: number } = { prompt: 0, completion: 0 };
   let lastContextSize: number = 0; // actual context size from last API call (prompt_tokens)
@@ -801,10 +686,12 @@ export async function runREPL(
     { cmd: "/logout",     desc: "Sign out and clear stored credentials" },
     { cmd: "/mcp",        desc: "MCP servers: list / enable / add / disable" },
     { cmd: "/model",      desc: "Pick model: Klaatu or custom third-party API" },
+    { cmd: "/paste",      desc: "Attach an image from the clipboard (same as ctrl+v)" },
     { cmd: "/perms",      desc: "Show permission rules" },
     { cmd: "/plugin",     desc: "List / reload plugins" },
     { cmd: "/resume",     desc: "Resume a saved session" },
     { cmd: "/review",     desc: "AI code review of current git diff" },
+    { cmd: "/rewind",     desc: "Time travel: fork at an earlier message + restore files (Esc-Esc)" },
     { cmd: "/rollback",   desc: "Restore files from a checkpoint" },
     { cmd: "/security-review", desc: "Security-focused review of uncommitted changes" },
     { cmd: "/sessions",   desc: "List saved sessions" },
@@ -812,6 +699,7 @@ export async function runREPL(
     { cmd: "/share",      desc: "Alias for /export" },
     { cmd: "/skill",      desc: "Invoke a saved prompt skill" },
     { cmd: "/test",       desc: "Run the project test suite" },
+    { cmd: "/verify",     desc: "Proof-of-work: typecheck + tests (/verify auto to set auto-mode)" },
     { cmd: "/theme",      desc: "Show or change the UI theme" },
     { cmd: "/tier",       desc: "Lock a Klaatu routing tier (smart to reset)" },
     { cmd: "/undo",       desc: "Revert files written by last response" },
@@ -822,7 +710,7 @@ export async function runREPL(
 
   /** Recompute the suggestion strip from the current input value. */
   function updateSlashSuggest(): void {
-    if (replState !== "idle" || permRequest || budgetPausePrompt || dialog.active || themePicker || askRequest) {
+    if (replState !== "idle" || permRequest || budgetPausePrompt || dialog.active || themePicker || rewindPicker || verifyPicker || askRequest) {
       slashSuggest = null;
       return;
     }
@@ -1839,6 +1727,7 @@ export async function runREPL(
           } else if (pluginRegistry.has(stool)) {
             sresult = await pluginRegistry.call(stc, projectRoot);
           } else {
+            capturePreWriteState(stc); // subagent writes rewind too
             sresult = await executeTools(stc, projectRoot, client);
           }
           subApiMsgs = [
@@ -1984,6 +1873,43 @@ export async function runREPL(
           }
         }
         pushSystemMsg(lines.join("\n"));
+        return true;
+      }
+
+      case "/rewind":
+        if (turnCheckpoints.length === 0) {
+          pushSystemMsg("Nothing to rewind yet — checkpoints are taken as you send messages this session.");
+          return true;
+        }
+        if (replState !== "idle") {
+          pushSystemMsg("Finish or interrupt the current turn first (esc), then /rewind.", "error");
+          return true;
+        }
+        rewindPicker = { cursor: turnCheckpoints.length - 1 };
+        app.requestRender();
+        return true;
+
+      case "/paste":
+        // Keyboard-free fallback for terminals that swallow ctrl+v
+        // (Windows Terminal, some tmux setups).
+        attachClipboardImage();
+        return true;
+
+      case "/verify": {
+        if (replState !== "idle") {
+          pushSystemMsg("Finish or interrupt the current turn first, then /verify.", "error");
+          return true;
+        }
+        const arg = (parts[1] ?? "").toLowerCase();
+        // `/verify` → run the check now. `/verify auto` (or setup/config) →
+        // open the auto-mode picker.
+        if (arg === "auto" || arg === "setup" || arg === "config") {
+          const cur = config.verify ?? "off";
+          verifyPicker = { cursor: Math.max(0, VERIFY_OPTIONS.findIndex(o => o.value === cur)) };
+          app.requestRender();
+          return true;
+        }
+        void runVerify("full");
         return true;
       }
 
@@ -3493,6 +3419,8 @@ export async function runREPL(
   async function sendMessage(text: string, opts: { noTools?: boolean } = {}): Promise<void> {
     if (!text.trim()) return;
     const turnT0 = Date.now();
+    let turnWroteFiles = false; // gates the proof-of-work auto-verify (function scope)
+    const turnEditedFiles = new Set<string>(); // relative paths edited this turn
 
     // ── ! shell injection ─────────────────────────────────────────────────
     if (text.trimStart().startsWith("!")) {
@@ -3558,6 +3486,18 @@ export async function runREPL(
     } else {
       userContent = resolvedText;
     }
+
+    // Time travel: checkpoint this turn's start state (lengths now, file
+    // pre-states captured lazily as the turn writes).
+    activeTurnCheckpoint = {
+      msgLen: messages.length,
+      apiLen: apiMessages.length,
+      userText: text,
+      at: Date.now(),
+      files: new Map(),
+    };
+    turnCheckpoints.push(activeTurnCheckpoint);
+    if (turnCheckpoints.length > 20) turnCheckpoints.shift();
 
     messages.push({ role: "user", content: text });
     appendSessionMsg({ role: "user", content: text });
@@ -3656,6 +3596,10 @@ export async function runREPL(
       }
 
       interrupted = false;
+      // Transient-error auto-retry budget for this turn (timeouts / dropped
+      // connections). Refills each round that makes progress.
+      let streamRetries = 0;
+      const MAX_STREAM_RETRIES = 1;
 
       outerLoop: while (true) {
         if (interrupted) break outerLoop;
@@ -3692,6 +3636,11 @@ export async function runREPL(
           currentApiMessages = compactMessagesForApi(currentApiMessages, getContextWindow(), compactOpts());
         }
 
+        // Heavy/reason/titan still buffer the whole completion server-side
+        // (until the A2 streaming deploy), so first-byte can exceed the 45s
+        // default on a big turn. Give the buffered tiers more headroom.
+        const pinnedT = forceTier ?? lastTier;
+        const headerTimeout = ["reason", "heavy", "titan"].includes(pinnedT) ? 180_000 : undefined;
         const stream = client.chatStream(
           compactMessagesForApi(currentApiMessages, getContextWindow(), compactOpts()),
           {
@@ -3699,6 +3648,7 @@ export async function runREPL(
             tier: forceTier ?? undefined,
             // D4 task-shape hint: plan mode routes to the plan-clamped cascade.
             task: planMode ? "plan" : undefined,
+            connectTimeoutMs: headerTimeout,
           },
         );
         let pendingToolCalls: ToolCall[] | null = null;
@@ -3798,9 +3748,32 @@ export async function runREPL(
             case "done":
               break;
             case "error": {
-              messages.push({
-                role: "assistant", content: `Error: ${chunk.error}`, kind: "error",
-              });
+              const raw = chunk.error ?? "stream error";
+              // Preserve whatever streamed before the drop — don't throw the
+              // partial answer away.
+              if (fullText.trim()) {
+                messages.push({ role: "assistant", content: fullText, model: lastModel, tier: lastTier, elapsed });
+                appendSessionMsg({ role: "assistant", content: fullText });
+              }
+              const transient = /timed out|timeout|connection|network|reach the model|ECONNRESET|socket|fetch failed|502|503|504/i.test(raw);
+              // Auto-retry once on a transient drop before surfacing anything.
+              if (transient && streamRetries < MAX_STREAM_RETRIES && !interrupted) {
+                streamRetries++;
+                messages.push({ role: "system", content: `⟳ Connection hiccup — retrying (${streamRetries}/${MAX_STREAM_RETRIES})…` });
+                chatLinesDirty = true;
+                streamBuffer = "";
+                fullText = "";
+                app.requestRender();
+                await new Promise(r => setTimeout(r, 800));
+                continue outerLoop;
+              }
+              // Give up: friendly, actionable message instead of a raw dump.
+              const friendly = transient
+                ? "The model didn't respond in time. Your message is still here — press Enter to resend, or check your connection."
+                : `Something went wrong: ${raw.replace(/^Error:\s*/i, "")}`;
+              messages.push({ role: "system", kind: "error", content: `⚠ ${friendly}` });
+              // Repopulate the composer so a resend is one keystroke away.
+              if (transient && !field.value) { field.value = text; field.cursorToEnd(); }
               chatLinesDirty = true;
               replState    = "idle";
               streamBuffer = "";
@@ -3954,6 +3927,7 @@ export async function runREPL(
 
           const runOne = async (tc: ToolCall, ph: ChatMessage): Promise<string> => {
             try {
+              capturePreWriteState(tc);
               const r = await executeWithPermission(tc);
               ph.content = r;
               return r;
@@ -4063,6 +4037,7 @@ export async function runREPL(
                 for (const t of touched) {
                   if (!toolResult.startsWith("Error")) {
                     ledger.fileWritten(t.path, t.kind);
+                    turnEditedFiles.add(t.path); // proof-of-work correlation
                   }
                   const absPath = resolve(projectRoot, t.path);
                   const existing = modifiedFiles.find(f => f.path === t.path);
@@ -4152,6 +4127,25 @@ export async function runREPL(
           };
         }
 
+        // Weak-model tool denial: the model claims it has no filesystem/shell
+        // access despite receiving the tool schemas (observed on the fast
+        // tier). Report to server health (E3) so the model gets demoted, and
+        // tell the user how to bypass immediately.
+        if (turnToolCounts.size === 0 && !opts.noTools &&
+            /(?:don'?t|do not) have (?:the ability|access)|can(?:'t|not) (?:run|execute) commands|no access to your (?:local )?(?:filesystem|files|repository)/i.test(cleanContent)) {
+          const blame = lastMeta?.metadata.model;
+          if (blame) {
+            client.queueFeedback({
+              model_id: blame, error_type: "tool_validation",
+              tier: lastMeta?.metadata.tier, detail: "claimed_no_tool_access",
+            });
+          }
+          messages.push({
+            role: "system",
+            content: "⚠ The served model wrongly claimed it has no tool access (reported to routing health). Retry the question, or pin a stronger tier with `/tier code`.",
+          });
+        }
+
         const assistantMsg: ChatMessage = {
           role: "assistant",
           content: cleanContent || fullText,
@@ -4171,6 +4165,7 @@ export async function runREPL(
 
         // Commit undo snapshot if AI wrote any files this turn
         if (currentResponseWrites.length > 0) {
+          turnWroteFiles = true;
           undoStack.push([...currentResponseWrites]);
           // Keep at most 20 undo levels
           if (undoStack.length > 20) undoStack.shift();
@@ -4228,6 +4223,14 @@ export async function runREPL(
 
     // Long turn finished — ping the terminal so a tabbed-away user knows.
     if (Date.now() - turnT0 > 15_000) notifyTerminal("Klaat Code — task finished");
+
+    // Proof-of-work: if this turn edited files and auto-verify is enabled,
+    // prove the change compiles/passes. Skipped when more input is queued
+    // (the task isn't settled yet) or when interrupted.
+    const verifyMode = config.verify ?? "off";
+    if (verifyMode !== "off" && turnWroteFiles && !interrupted && queuedMessages.length === 0) {
+      await runVerify(verifyMode === "full" ? "full" : "types", { auto: true, editedFiles: [...turnEditedFiles] });
+    }
 
     // Input queued after the last round boundary runs now, in order.
     drainQueue();
@@ -4452,7 +4455,74 @@ export async function runREPL(
       selLineB = Math.min(chatLines.length - 1, b);
     }
 
-    if (themePicker) {
+    if (rewindPicker) {
+      // ── Time-travel rewind picker ─────────────────────────────────────
+      hideCursor();
+      const rp = rewindPicker;
+      let ry = chatInner.y + 1;
+      drawStyledLine(buf, chatInner, ry, [
+        span("⏪ ", { fg: palette.accent, bold: true }),
+        span("Rewind", { fg: "white", bold: true }),
+        span("  — fork the conversation at an earlier message; files edited after it are restored", { fg: palette.mutedFg }),
+      ]);
+      ry += 2;
+      for (let i = 0; i < turnCheckpoints.length; i++) {
+        if (ry >= chatInner.y + chatInner.height - 2) break;
+        const cp = turnCheckpoints[i]!;
+        const isFocused = i === rp.cursor;
+        const when = new Date(cp.at).toLocaleTimeString();
+        const preview = cp.userText.replace(/\s+/g, " ").slice(0, Math.max(20, chatInner.width - 30));
+        // Files that rewinding HERE would restore = union from this turn forward.
+        const nFiles = new Set(turnCheckpoints.slice(i).flatMap(c => [...c.files.keys()])).size;
+        drawStyledLine(buf, chatInner, ry, [
+          span("  ", {}),
+          span(isFocused ? "▶ " : "  ", { fg: isFocused ? palette.accent : palette.mutedFg, bold: isFocused }),
+          span(when, { fg: palette.mutedFg }),
+          span("  ", {}),
+          span(preview, { fg: isFocused ? "white" : 252, bold: isFocused }),
+          ...(nFiles > 0 ? [span(`  · ${nFiles} file${nFiles > 1 ? "s" : ""} to restore`, { fg: 222 })] : []),
+        ]);
+        ry++;
+      }
+      ry += 1;
+      if (ry < chatInner.y + chatInner.height) {
+        drawStyledLine(buf, chatInner, ry, [
+          span("  ↑↓ pick a message · enter rewind & edit · esc cancel", { fg: palette.mutedFg }),
+        ]);
+      }
+    } else if (verifyPicker) {
+      // ── Auto-verify mode picker ───────────────────────────────────────
+      hideCursor();
+      const vp = verifyPicker;
+      let vy = chatInner.y + 1;
+      drawStyledLine(buf, chatInner, vy, [
+        span("⚙ ", { fg: palette.accent, bold: true }),
+        span("Auto-verify", { fg: "white", bold: true }),
+        span("  — prove edits work automatically after each turn", { fg: palette.mutedFg }),
+      ]);
+      vy += 2;
+      for (let i = 0; i < VERIFY_OPTIONS.length; i++) {
+        if (vy >= chatInner.y + chatInner.height - 2) break;
+        const o = VERIFY_OPTIONS[i]!;
+        const isCurrent = o.value === (config.verify ?? "off");
+        const isFocused = i === vp.cursor;
+        drawStyledLine(buf, chatInner, vy, [
+          span("    ", {}),
+          span(isFocused ? "▶ " : "  ", { fg: isFocused ? palette.accent : palette.mutedFg, bold: isFocused }),
+          span(o.label, { fg: isFocused ? "white" : 252, bold: isFocused || isCurrent }),
+          span("  — ", { fg: palette.mutedFg }),
+          span(o.desc, { fg: isFocused ? 252 : palette.mutedFg }),
+          ...(isCurrent ? [span("  ●", { fg: 114 })] : []),
+        ]);
+        vy++;
+      }
+      vy += 1;
+      if (vy < chatInner.y + chatInner.height) {
+        drawStyledLine(buf, chatInner, vy, [
+          span("  ↑↓ navigate · enter select · esc cancel", { fg: palette.mutedFg }),
+        ]);
+      }
+    } else if (themePicker) {
       // ── Interactive theme picker overlay ──────────────────────────────
       hideCursor();
       const tp = themePicker;
@@ -5370,27 +5440,7 @@ export async function runREPL(
     // Attach a raw image from the OS clipboard (screenshots have no file
     // path, so they never arrive through the terminal's text paste).
     if (dialog.active) return;
-    const res = readClipboardImage();
-    if (!res.ok) {
-      if (res.reason === "too_large") {
-        const mb = (res.sizeBytes / (1024 * 1024)).toFixed(1);
-        const cap = (MAX_IMAGE_BYTES / (1024 * 1024)).toFixed();
-        pushSystemMsg(
-          `Clipboard image is ${mb}MB, over the ${cap}MB limit — try a smaller crop or window screenshot.`
-        );
-      } else {
-        pushSystemMsg("No image on the clipboard. (Text pastes with cmd/ctrl+shift+v as usual.)");
-      }
-      chatLinesDirty = true;
-      app.requestRender();
-      return;
-    }
-    const img = res.image;
-    const n = pendingImages.length + 1;
-    pendingImages.push({ path: `clipboard-${n}.png`, b64: img.b64, mime: img.mime });
-    field.paste(`[Image: clipboard #${n}] `);
-    chatLinesDirty = true;
-    app.requestRender();
+    attachClipboardImage();
   }));
   unsubscribers.push(app.onKey("ctrl+d", () => {
     // In vim NORMAL mode, ctrl+d scrolls chat down (half-page)
@@ -5406,7 +5456,9 @@ export async function runREPL(
 
   unsubscribers.push(app.onKey("escape", () => {
     if (dialog.active) { dialog.dismiss(); return; }
+    if (rewindPicker) { rewindPicker = null; app.requestRender(); return; }
     if (slashSuggest) { slashSuggest = null; app.requestRender(); return; }
+    if (verifyPicker) { verifyPicker = null; app.requestRender(); return; }
     if (themePicker) { themePicker = null; app.requestRender(); return; }
     if (askRequest) { const aq = askRequest; askRequest = null; aq.resolve("(user skipped — decide with your best judgment)"); app.requestRender(); return; }
     // The permission and budget-pause cards both advertise "esc" in their hint
@@ -5446,6 +5498,19 @@ export async function runREPL(
       chatLinesDirty = true;
       stopTimer();
       app.requestRender();
+      return;
+    }
+
+    // Idle + empty composer: Esc-Esc (within 1.5s) opens the rewind picker.
+    if (replState === "idle" && field.value === "" && !(vimMode && !vimInsert)) {
+      const now = Date.now();
+      if (now - lastEscapeAt < 1_500 && turnCheckpoints.length > 0) {
+        lastEscapeAt = 0;
+        rewindPicker = { cursor: turnCheckpoints.length - 1 };
+        app.requestRender();
+      } else {
+        lastEscapeAt = now;
+      }
     }
   }));
 
@@ -5632,10 +5697,211 @@ export async function runREPL(
     totalRequests++;
     tierCounts.set(tier, (tierCounts.get(tier) ?? 0) + 1);
     if (chunk.metadata) {
-      lastMeta  = { metadata: chunk.metadata, cost: KlaatAIClient.formatCost(chunk.metadata, chunk.usage), usage: chunk.usage };
-      lastModel = chunk.metadata.model ?? lastModel;
-      lastTier  = chunk.metadata.tier ?? lastTier;
+      // /why shows the side call, but lastTier/lastModel stay untouched —
+      // they drive the dialect selector, context window, and stream header
+      // for the MAIN conversation; a side call must never shift them.
+      lastMeta = { metadata: chunk.metadata, cost: KlaatAIClient.formatCost(chunk.metadata, chunk.usage), usage: chunk.usage };
     }
+  }
+
+  /**
+   * Time travel: record a file's pre-write content into the active turn's
+   * checkpoint BEFORE a mutating tool touches it. First capture per file per
+   * turn wins — that's the state "before this turn" by definition.
+   */
+  function capturePreWriteState(tc: ToolCall): void {
+    const cp = activeTurnCheckpoint;
+    if (!cp) return;
+    const name = tc.function.name;
+    const base = name.includes("__") ? name.slice(name.lastIndexOf("__") + 2) : name;
+    if (!["write_file", "create_file", "edit_file", "edit_block", "multi_edit", "apply_patch"].includes(base)) return;
+    try {
+      const args = JSON.parse(tc.function.arguments) as { path?: string; file_path?: string; patch?: string };
+      const rels: string[] = [];
+      if (base === "apply_patch") {
+        const parsed = parsePatch(String(args.patch ?? ""));
+        if (parsed.ok) {
+          for (const op of parsed.ops) {
+            rels.push(op.path);
+            if (op.type === "update" && op.moveTo) rels.push(op.moveTo);
+          }
+        }
+      } else {
+        const p = args.path ?? args.file_path;
+        if (p) rels.push(p);
+      }
+      for (const rel of rels) {
+        if (cp.files.has(rel)) continue;
+        const abs = resolve(projectRoot, rel);
+        try {
+          cp.files.set(rel, existsSync(abs) ? readFileSync(abs, "utf-8") : null);
+        } catch { /* unreadable — skip */ }
+      }
+    } catch { /* bad args — nothing to capture */ }
+  }
+
+  /**
+   * Fork the conversation at checkpoint `idx`: restore every file to its
+   * pre-turn state (walking forward from idx so the EARLIEST pre-state wins),
+   * truncate transcript + API history, rewrite the session file so resume
+   * follows the new branch, and hand the original message back for editing.
+   */
+  function performRewind(idx: number): void {
+    const cp = turnCheckpoints[idx];
+    if (!cp) return;
+
+    // Earliest pre-state per file across the rewound turns.
+    const restore = new Map<string, string | null>();
+    for (let i = idx; i < turnCheckpoints.length; i++) {
+      for (const [rel, content] of turnCheckpoints[i]!.files) {
+        if (!restore.has(rel)) restore.set(rel, content);
+      }
+    }
+    let restored = 0, removed = 0;
+    const errors: string[] = [];
+    for (const [rel, content] of restore) {
+      const abs = resolve(projectRoot, rel);
+      try {
+        if (content === null) {
+          if (existsSync(abs)) { unlinkSync(abs); removed++; }
+        } else {
+          writeFileSync(abs, content, "utf-8");
+          restored++;
+        }
+      } catch (e) {
+        errors.push(`${rel}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+
+    // Truncate conversation to the fork point.
+    messages.splice(cp.msgLen);
+    apiMessages = apiMessages.slice(0, cp.apiLen);
+    turnCheckpoints.splice(idx);
+    activeTurnCheckpoint = null;
+    lastContextSize = estimateContextTokens(apiMessages);
+
+    // Rewrite the session file so a resume follows this branch, not the old one.
+    try {
+      writeFileSync(sessionFile, messages.map(m => JSON.stringify(m) + "\n").join(""), "utf-8");
+      appendSessionStats();
+    } catch { /* best-effort */ }
+
+    const fileNote = restored + removed > 0
+      ? ` ${restored} file(s) restored${removed > 0 ? `, ${removed} new file(s) removed` : ""}.`
+      : " No file changes to undo.";
+    const errNote = errors.length > 0 ? `\n\nCould not restore:\n${errors.join("\n")}` : "";
+    pushSystemMsg(`⏪ Rewound to before your message from ${new Date(cp.at).toLocaleTimeString()}.${fileNote} Edit and resend below.${errNote}`);
+
+    field.value = cp.userText;
+    field.cursorToEnd();
+    chatLinesDirty = true;
+    chatAutoScroll = true;
+    app.requestRender();
+  }
+
+  /**
+   * Attach an image from the OS clipboard to the next message. Shared by
+   * ctrl+v, the /paste command, and the empty-paste fallback (terminals emit
+   * an empty bracketed paste for an image-only clipboard on some platforms).
+   */
+  function attachClipboardImage(opts: { quiet?: boolean } = {}): boolean {
+    const res = readClipboardImage();
+    if (!res.ok) {
+      if (opts.quiet) return false;
+      if (res.reason === "too_large") {
+        const mb = (res.sizeBytes / (1024 * 1024)).toFixed(1);
+        const cap = (MAX_IMAGE_BYTES / (1024 * 1024)).toFixed();
+        pushSystemMsg(
+          `Clipboard image is ${mb}MB, over the ${cap}MB limit — try a smaller crop or window screenshot.`
+        );
+      } else {
+        pushSystemMsg("No image on the clipboard. Copy a screenshot first, then press ctrl+v (or run /paste).");
+      }
+      chatLinesDirty = true;
+      app.requestRender();
+      return false;
+    }
+    const n = pendingImages.length + 1;
+    pendingImages.push({ path: `clipboard-${n}.png`, b64: res.image.b64, mime: res.image.mime });
+    field.paste(`[Image: clipboard #${n}] `);
+    chatLinesDirty = true;
+    app.requestRender();
+    return true;
+  }
+
+  /** True while a proof-of-work verify run is in flight (dedupes auto+manual). */
+  let verifyRunning = false;
+
+  /**
+   * Proof-of-work verification: run the project's typecheck (and tests, for
+   * "full"/manual), post a receipt to the transcript, and — when failures are
+   * found on the auto path — feed the failing output back so the agent fixes
+   * it next turn. `scope` "types" runs typecheck only (fast); "full" runs both.
+   */
+  async function runVerify(scope: "types" | "full", opts: { auto?: boolean; editedFiles?: string[] } = {}): Promise<void> {
+    if (verifyRunning) return;
+    const { test, typecheck } = detectVerifyCommands(projectRoot);
+    const toRun: { cmd: string; runner: string }[] = [];
+    if (typecheck) toRun.push(typecheck);
+    if (scope === "full" && test) toRun.push(test);
+    if (toRun.length === 0) {
+      if (!opts.auto) pushSystemMsg("Nothing to verify — no test or typecheck command detected for this project.");
+      return;
+    }
+    verifyRunning = true;
+    const label = toRun.map(c => c.runner).join(" + ");
+    pushSystemMsg(`⚙ Verifying — running ${label}…`);
+    chatLinesDirty = true;
+    app.requestRender();
+
+    const results: CheckResult[] = [];
+    for (const c of toRun) results.push(await runCheck(c.cmd, c.runner, projectRoot));
+    verifyRunning = false;
+
+    const { line, allOk } = summarizeChecks(results);
+    if (allOk) {
+      pushSystemMsg(`✓ **Verified** — ${line}`);
+      chatLinesDirty = true; app.requestRender();
+      return;
+    }
+
+    const failed = results.find(r => !r.ok)!;
+    const snip = failed.output.length > 2500 ? failed.output.slice(-2500) : failed.output;
+
+    // Correlate failures with what the agent changed (this turn on the auto
+    // path; the whole session's modified files otherwise) so a project that
+    // was already broken never reads as "your edit broke it". File-level, since
+    // line numbers shift on edit.
+    const changed = (opts.editedFiles ?? modifiedFiles.map(f => f.path))
+      .map(f => f.replace(/\\/g, "/").replace(/^\.\//, ""));
+    const failingFiles = extractFailingFiles(results);
+    const introduced = changed.filter(c => [...failingFiles].some(f => f === c || f.endsWith("/" + c) || c.endsWith("/" + f)));
+
+    // Failures, but none in code the agent changed → pre-existing. Don't dump
+    // the wall of errors or blame the agent; just note it.
+    if (failingFiles.size > 0 && introduced.length === 0) {
+      const n = failingFiles.size;
+      const noun = `${n} pre-existing ${n === 1 ? "issue" : "issues"}`;
+      pushSystemMsg(
+        changed.length > 0
+          ? `✓ **Your changes look clean** — ${line}, but the project has ${noun} in files you didn't change (not from this work). Run the check directly to see them.`
+          : `⚠ **Project has ${noun}** — ${line}. Nothing was changed this session to attribute them to; run the check directly for details.`,
+      );
+      chatLinesDirty = true; app.requestRender();
+      return;
+    }
+
+    // Introduced (or manual run with no change context) → show the error + fix.
+    const whose = introduced.length > 0 ? ` in your changes (${introduced.join(", ")})` : "";
+    pushSystemMsg(`✗ **Verification failed** — ${line}${whose}\n\n\`\`\`\n${snip || "(no output)"}\n\`\`\``, "error");
+    if (opts.auto && introduced.length > 0) {
+      apiMessages = [...apiMessages, {
+        role: "system",
+        content: `[Proof-of-work] Your edits to ${introduced.join(", ")} did not pass ${failed.runner}. Fix these before considering the task done:\n${snip.slice(0, 2000)}`,
+      }];
+    }
+    chatLinesDirty = true;
+    app.requestRender();
   }
 
   /** Run queued input in order once the agent is free. */
@@ -5650,6 +5916,26 @@ export async function runREPL(
 
   unsubscribers.push(app.onKey("enter", (ev) => {
     if (dialog.active) { dialog.handleKey(ev); return; }
+    if (rewindPicker) {
+      const idx = rewindPicker.cursor;
+      rewindPicker = null;
+      performRewind(idx);
+      return;
+    }
+    if (verifyPicker) {
+      const opt = VERIFY_OPTIONS[verifyPicker.cursor]!;
+      verifyPicker = null;
+      config.verify = opt.value;
+      saveConfig({ verify: opt.value });
+      pushSystemMsg(
+        opt.value === "off"
+          ? "Auto-verify **off**. Run `/verify` manually anytime."
+          : `Auto-verify set to **${opt.label}** (${opt.desc}). It runs after any turn that edits files.`,
+      );
+      chatLinesDirty = true;
+      app.requestRender();
+      return;
+    }
     if (themePicker) {
       const selected = THEME_NAMES[themePicker.cursor];
       themePicker = null;
@@ -5700,6 +5986,8 @@ export async function runREPL(
 
   unsubscribers.push(app.onKey("up", (ev) => {
     if (dialog.active) { dialog.handleKey(ev); return; }
+    if (rewindPicker) { rewindPicker.cursor = (rewindPicker.cursor - 1 + turnCheckpoints.length) % turnCheckpoints.length; app.requestRender(); return; }
+    if (verifyPicker) { verifyPicker.cursor = (verifyPicker.cursor - 1 + VERIFY_OPTIONS.length) % VERIFY_OPTIONS.length; app.requestRender(); return; }
     if (themePicker) { themePicker.cursor = (themePicker.cursor - 1 + THEME_NAMES.length) % THEME_NAMES.length; app.requestRender(); return; }
     if (askRequest) { askRequest.cursor = (askRequest.cursor - 1 + askRequest.options.length) % askRequest.options.length; app.requestRender(); return; }
     if (slashSuggest) {
@@ -5718,6 +6006,8 @@ export async function runREPL(
 
   unsubscribers.push(app.onKey("down", (ev) => {
     if (dialog.active) { dialog.handleKey(ev); return; }
+    if (rewindPicker) { rewindPicker.cursor = (rewindPicker.cursor + 1) % turnCheckpoints.length; app.requestRender(); return; }
+    if (verifyPicker) { verifyPicker.cursor = (verifyPicker.cursor + 1) % VERIFY_OPTIONS.length; app.requestRender(); return; }
     if (themePicker) { themePicker.cursor = (themePicker.cursor + 1) % THEME_NAMES.length; app.requestRender(); return; }
     if (askRequest) { askRequest.cursor = (askRequest.cursor + 1) % askRequest.options.length; app.requestRender(); return; }
     if (slashSuggest) {
@@ -5750,8 +6040,8 @@ export async function runREPL(
   }));
 
   unsubscribers.push(app.onKey("*", (ev) => {
-    // Theme picker: swallow all keys (only up/down/enter/esc handled above)
-    if (themePicker) return;
+    // Pickers: swallow all keys (only up/down/enter/esc handled above)
+    if (themePicker || rewindPicker || verifyPicker) return;
     // ask_user picker: space toggles (multi), number keys jump to option
     if (askRequest) {
       const aq = askRequest;
@@ -5942,8 +6232,19 @@ export async function runREPL(
   unsubscribers.push(app.onPaste((text) => {
     if (dialog.active) return;
 
-    // ── Detect pasted image file path ──────────────────────────────────────
-    const trimmed = text.trim();
+    // ── Image-only clipboard: some terminals emit an empty bracketed paste
+    // when the clipboard holds no text (e.g. cmd+v after a screenshot copy).
+    // Fall through to the OS clipboard image reader so cmd+v "just works".
+    if (!text.trim()) {
+      attachClipboardImage({ quiet: true });
+      return;
+    }
+
+    // ── Detect pasted image file path (Finder/Explorer copy → path or file:// URL)
+    let trimmed = text.trim();
+    if (trimmed.startsWith("file://")) {
+      try { trimmed = decodeURIComponent(trimmed.slice("file://".length)); } catch { /* keep raw */ }
+    }
     const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
     const dotIdx = trimmed.lastIndexOf(".");
     const ext = dotIdx !== -1 ? trimmed.slice(dotIdx).toLowerCase() : "";
