@@ -105,7 +105,7 @@ async function runTask(
 }
 
 async function main(): Promise<void> {
-  const suite = JSON.parse(await readFile(resolve(HERE, "suite.json"), "utf-8")) as Suite;
+  const suite = JSON.parse(await readFile(resolve(HERE, process.env.BENCH_SUITE ?? "suite.json"), "utf-8")) as Suite;
   const tier = arg("tier");
   const only = arg("only");
   const from = arg("from");

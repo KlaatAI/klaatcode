@@ -21,7 +21,7 @@ import { spawnSync } from "node:child_process";
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 interface Task { id: string; dir: string; verify?: string }
-interface Suite { name: string; verify: string; tasks: Task[] }
+interface Suite { name: string; verify: string; solutionsDir?: string; tasks: Task[] }
 
 const exists = (p: string) => stat(p).then(() => true, () => false);
 
@@ -30,13 +30,13 @@ function verifyPasses(dir: string, cmd: string): boolean {
   return spawnSync(c!, args, { cwd: dir, encoding: "utf-8", timeout: 60_000 }).status === 0;
 }
 
-const suite = JSON.parse(await readFile(resolve(HERE, "suite.json"), "utf-8")) as Suite;
+const suite = JSON.parse(await readFile(resolve(HERE, process.env.BENCH_SUITE ?? "suite.json"), "utf-8")) as Suite;
 console.log(`\n  ${suite.name} — checking ${suite.tasks.length} task(s)\n`);
 
 let broken = 0;
 for (const task of suite.tasks) {
   const fixture = resolve(HERE, task.dir);
-  const solution = resolve(HERE, "solutions", task.id);
+  const solution = resolve(HERE, suite.solutionsDir ?? "solutions", task.id);
   const cmd = task.verify ?? suite.verify;
   const problems: string[] = [];
 
