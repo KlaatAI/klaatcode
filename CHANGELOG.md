@@ -5,6 +5,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); version
 
 ## [Unreleased]
 
+## [2.4.1] — 2026-08-03
+
 ### Added
 
 - **Headless exec contract (`klaatai run` for CI/automation)** — `run` is now a real agentic loop (tools, multi-round) with a machine-facing contract, so scripts and CI can drive it reliably:
@@ -20,24 +22,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); version
   - **No false blame** — auto mode correlates failures with the files the turn actually touched. A project that was already failing typecheck reads as "✓ your changes look clean — issues only in files you didn't touch (pre-existing)", and only genuinely introduced failures are fed back to the agent to fix. (Fixes the first-run experience of pointing it at a repo with pre-existing errors.)
   - Detection, summary, and failing-file extraction are unit-tested (`src/agent/verify.test.ts`).
 
-### Internal
-
-- **repl.ts split, step 1** — the pure presentation helpers (cost/label formatting, tier-clamp parsing, shell/path syntax highlighting, rotating status verbs and tips) moved to `src/screens/repl-format.ts`, which is now independently unit-tested (`repl-format.test.ts`). No behavior change; first safe slice of the Phase 0.3 decomposition. The deep-closure functions (render/handleSlashCommand/sendMessage) remain in place pending the dedicated ReplContext refactor.
+- **Time travel (`/rewind`, Esc-Esc)** — press Esc twice on an empty prompt (or run `/rewind`) to fork the conversation at any earlier message: the transcript and API history truncate to that point, every file the rewound turns modified is restored to its pre-turn state (new files are removed; per-turn pre-write snapshots are captured automatically, including subagent writes), the session file is rewritten so resume follows the new branch, and your original message lands back in the input for editing. The picker shows each message with how many files a rewind would restore.
 
 ### Fixed
 
 - **Mid-stream stall no longer hangs the turn forever** — the client already salvaged a socket *error*, but a silent stall (socket stays open, zero bytes — a load balancer holding the connection or a hung model) left `reader.read()` pending indefinitely with no spinner progress and no way out but Ctrl+C. An idle watchdog now races each read: the first body read gets a generous allowance (buffered reason/heavy/titan tiers send nothing until the whole completion is ready), and once streaming begins a 90s gap between chunks is treated as a stall — routed into the existing salvage path (partial output preserved) and surfaced as a transient error, which the turn auto-retries once. Deterministic (no cancel/reject race). Configurable via `idleTimeoutMs`.
 - **Timeout / dropped-connection UX** — a mid-turn stream error no longer dumps a raw red `Error: Timed out waiting for the model to respond`. Transient drops (timeout, network, 502/503/504) now auto-retry once silently; if it still fails, any partial answer that already streamed is preserved, the message is friendly and actionable ("Your message is still here — press Enter to resend"), and your text is put back in the composer for a one-key resend. Buffered tiers (reason/heavy/titan, which hold the whole completion server-side until the A2 streaming deploy) now get a 180s first-byte timeout instead of the 45s default, so long turns stop timing out in the first place.
 
-### Added
+- **Raw `<tool_call>` XML never reaches the screen** — some cheap-tier models emit tool calls as literal `<tool_call><function=write_file>…` text instead of a real tool call. Previously that XML streamed straight into the transcript as if it were the answer, and if the stream dropped before it finished, the turn ended with the block on screen and nothing executed. The stream renderer now withholds output from the moment a tool-call opener appears (including openers split across tokens) and releases only the safe remainder, so a leak can no longer masquerade as the reply. Server-side parsing still converts the block into a real tool call, so the work actually runs. (Paired with a server fix that stops these models from taking the live-streaming path at all.)
 
-- **Time travel (`/rewind`, Esc-Esc)** — press Esc twice on an empty prompt (or run `/rewind`) to fork the conversation at any earlier message: the transcript and API history truncate to that point, every file the rewound turns modified is restored to its pre-turn state (new files are removed; per-turn pre-write snapshots are captured automatically, including subagent writes), the session file is rewritten so resume follows the new branch, and your original message lands back in the input for editing. The picker shows each message with how many files a rewind would restore.
-
-### Fixed
+- **"I'll fix it now" no longer ends the turn without doing anything** — a round that announced work but called zero tools used to be treated as the final answer, so the agent would promise a fix, stop, and repeat the same promise every time you re-asked. Such a round is now detected and nudged to act (up to twice per turn), the narration is kept, and the model is reported to routing health (`promised_action_no_tool_call`) so the router learns which models narrate instead of working. Skipped in plan mode, when tools are unavailable, and when the message ends in a question (a genuine hand-off to you).
 
 - **Weak-model "I can't run commands" denials** — some cheap-tier models occasionally claim they have no filesystem/shell access despite receiving tool schemas. Three-layer fix: the system prompt now explicitly forbids that claim, the response is auto-detected and reported to routing health (`tool_validation` feedback, so the model demotes server-side), and the user gets an immediate hint (retry or `/tier code`). Side-channel calls (`/btw`, `/advisor`) also no longer overwrite the main conversation's tier/model state, which could subtly shift the dialect and window between turns.
 
 - **Clipboard image paste now "just works"** — the ctrl+v machinery existed but the common flows missed it: cmd+v with an image-only clipboard produces an *empty* terminal paste on many emulators (now falls through to the OS clipboard image reader automatically), Finder/Explorer copies that paste as `file://` URLs are now resolved, and a new `/paste` command covers terminals that swallow ctrl+v entirely (Windows Terminal, some tmux setups). Input placeholder now advertises the shortcut.
+
+### Internal
+
+- **repl.ts split, step 1** — the pure presentation helpers (cost/label formatting, tier-clamp parsing, shell/path syntax highlighting, rotating status verbs and tips) moved to `src/screens/repl-format.ts`, which is now independently unit-tested (`repl-format.test.ts`). No behavior change; first safe slice of the Phase 0.3 decomposition. The deep-closure functions (render/handleSlashCommand/sendMessage) remain in place pending the dedicated ReplContext refactor.
+
+### Notes
+
+- Requires the Klaatu gateway deployed **2026-08-03 or later** for the server half of the tool-call XML fix and the timeout guards. Check with `curl https://api.klaatai.com/health` — the `build` field now reports the serving commit.
+- Verify an install actually carries this release: `klaatcode --version` reports `2.4.1`. (2.4.0 shipped as two different builds under one version string; that is what this bump fixes.)
 
 ## [2.4.0] — 2026-07-31
 
