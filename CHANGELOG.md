@@ -5,6 +5,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); version
 
 ## [Unreleased]
 
+## [2.4.2] — 2026-08-03
+
+### Fixed
+
+- **Version alignment** — ensures `klaatcode --version` reports `2.4.2` on every install channel (npm, curl/PowerShell installer, Homebrew). No functional changes beyond 2.4.1; use this release to verify you are on the current build.
+
 ## [2.4.1] — 2026-08-03
 
 ### Added
