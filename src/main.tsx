@@ -69,7 +69,13 @@ function deriveWebUrl(baseUrl: string): string {
 /**
  * Full boot sequence: Splash → auth (if needed) → Welcome → REPL.
  */
-async function boot(opts: { baseUrl?: string; dir?: string; resumeId?: string } = {}): Promise<void> {
+async function boot(opts: { baseUrl?: string; dir?: string; resumeId?: string; noUpdateCheck?: boolean } = {}): Promise<void> {
+  // ── 0. Update gate (before the TUI owns the terminal) ─────────────────────
+  // Asks Y/n when a newer release exists, force-updates below the supported
+  // floor, and re-execs the new binary on success. Fail-silent when offline.
+  const { runUpdateGate } = await import("./commands/update-gate.js");
+  await runUpdateGate({ noUpdateCheck: opts.noUpdateCheck });
+
   // ── Session picker (runs before TUI when `klaatcode -r` with no ID) ───────
   if (opts.resumeId === "pick") {
     const picked = await runSessionPicker();
@@ -199,7 +205,11 @@ async function boot(opts: { baseUrl?: string; dir?: string; resumeId?: string } 
 const program = new Command();
 
 program
-  .name("klaatai")
+  // MUST match the shipped binary name, not the source package name. Every
+  // install channel installs `klaatcode` (publish-npm.ts launcher, install.ts
+  // BIN_NAME, brew formula) — naming this "klaatai" made every "run `klaatai
+  // upgrade`" hint in help + the update notice a command-not-found.
+  .name("klaatcode")
   .description("KlaatAI CLI — AI coding assistant with smart model routing")
   .version(VERSION, "-v, --version", "Print version and exit");
 
@@ -212,11 +222,12 @@ program
   .option("--base-url <url>", "API base URL override")
   .option("-r, --resume [id]", "Resume a previous session (shows picker if no id)")
   .option("--continue", "Alias for --resume (resume last session)")
-  .action(async (dir: string | undefined, opts: { baseUrl?: string; resume?: string | boolean; continue?: boolean }) => {
+  .option("--no-update-check", "Skip the startup update check/prompt")
+  .action(async (dir: string | undefined, opts: { baseUrl?: string; resume?: string | boolean; continue?: boolean; updateCheck?: boolean }) => {
     const resumeId = opts.continue ? "last" :
       opts.resume === true ? "pick" :
       (typeof opts.resume === "string" ? opts.resume : undefined);
-    await boot({ ...opts, dir, resumeId });
+    await boot({ ...opts, dir, resumeId, noUpdateCheck: opts.updateCheck === false });
   });
 
 // ── klaatai run (non-interactive / headless) ──────────────────────────────────
@@ -264,6 +275,10 @@ async function runHeadless(opts: {
   noTools?: boolean;
   maxTurns?: string;
 }): Promise<void> {
+  // Scripted runs get told about an update on stderr, never prompted.
+  const { runUpdateGate } = await import("./commands/update-gate.js");
+  await runUpdateGate({ neverPrompt: true });
+
   const config  = loadConfig();
   const baseUrl = opts.baseUrl ?? config.baseUrl;
   const apiKey  = process.env["KLAATAI_API_KEY"] ?? await getValidAuthToken();
@@ -399,7 +414,7 @@ program
     await runHeadless({ ...opts, prompt, noTools: opts.tools === false });
   });
 
-// ── klaatai upgrade ───────────────────────────────────────────────────────────
+// ── klaatcode upgrade ─────────────────────────────────────────────────────────
 
 program
   .command("upgrade")

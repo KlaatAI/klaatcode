@@ -68,7 +68,7 @@ import { initLocalDb, localDbGetStats } from "../tools/local-db.js";
 import { resolveProjectId } from "../utils/project-id.js";
 import { MCPManager, loadMCPConfig, type MCPServerConfig } from "../mcp/client.js";
 import { seedSystemMessages, MODE_PROMPTS } from "../agent/system-prompt.js";
-import { checkForUpdate } from "../utils/update.js";
+import { checkForUpdate, isUpdateDismissed } from "../utils/update.js";
 import { readClipboardImage, MAX_IMAGE_BYTES } from "../utils/clipboard-image.js";
 import { SessionLedger } from "../agent/session-ledger.js";
 import { COMPACTION_PROMPT, extractSummary, MAX_CONSECUTIVE_COMPACT_FAILURES } from "../agent/compaction-prompt.js";
@@ -6574,10 +6574,12 @@ export async function runREPL(
   // Fetch lifetime stats in background (non-blocking — sidebar shows "Fetching…" until done)
   void fetchLifetimeStats();
 
-  // Update check (cached 4h, fail-silent) — one dim notice line if newer exists
+  // Update check (cached 4h, fail-silent) — one dim notice line if newer exists.
+  // Suppressed when the startup gate already asked and the user declined this
+  // version; otherwise every launch would both prompt and nag.
   void checkForUpdate().then((u) => {
-    if (u?.updateAvailable) {
-      pushSystemMsg(`Update available: v${u.current} → **v${u.latest}** — run \`klaatai upgrade\`.`);
+    if (u?.updateAvailable && !isUpdateDismissed(u.latest)) {
+      pushSystemMsg(`Update available: v${u.current} → **v${u.latest}** — run \`klaatcode upgrade\`.`);
       app.requestRender();
     }
   });

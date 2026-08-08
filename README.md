@@ -458,6 +458,7 @@ klaatcode serve --port 4200
 | `attentionOrder` | `on` / `off` | Arrange old history so the most relevant turns sit where models attend |
 | `maxSessionCost` | USD number | Hard session cost cap — pauses agent rounds when reached |
 | `phaseBudgets` | `on` / `off` | Per-phase token budgets; pause a stuck explore phase before it burns the budget |
+| `telemetry` | `on` / `off` | Install-level reporting (see [Staying up to date](#staying-up-to-date)) |
 
 Full reference, incl. every config key: [klaatai.com/docs/configuration](https://klaatai.com/docs/configuration).
 
@@ -483,6 +484,54 @@ Full reference, incl. every config key: [klaatai.com/docs/configuration](https:/
   skills/             # project prompt skills
   tools/              # project tool plugins (.js)
 ```
+
+## Staying Up To Date
+
+`klaatcode` checks for a newer release when it starts (cached 4h, fail-silent — offline never blocks a launch) and asks before doing anything:
+
+```
+Update available: v2.4.2 → v2.4.3
+Update now? [Y/n]
+```
+
+Say yes and it upgrades through whichever channel installed it (npm, Homebrew, the install script, or the PowerShell installer), verifies the new binary actually reports the new version, and relaunches with your original arguments. Say no and it won't ask again for that release. If the upgrade command fails or the version doesn't change — usually a half-broken global install, or an old `klaatcode-ai` 1.x binary still winning on `PATH` — it falls back to a clean uninstall + reinstall, then tells you exactly what to run if even that fails. It never leaves you without a working CLI.
+
+```bash
+klaatcode upgrade          # upgrade now
+klaatcode upgrade --check  # just report what's available
+klaatcode --no-update-check   # skip the check for this run
+```
+
+Opt out permanently with `KLAATAI_NO_UPDATE=1`. The check is skipped automatically in CI and any non-interactive shell — those print one line to stderr instead of prompting.
+
+Very old builds can be refused by the server (HTTP 426) after a breaking protocol change, with the upgrade command in the response. That floor is off unless a release note says otherwise; `KLAATAI_SKIP_VERSION_GATE=1` bypasses the client-side check at your own risk.
+
+### What the CLI reports about itself
+
+Every request carries four headers so we can tell how many installs are live and which builds are still out there:
+
+| Header | Example | Why |
+|---|---|---|
+| `X-KlaatAI-Client-Version` | `2.4.3` | Version adoption; enforcing the minimum supported build |
+| `X-KlaatAI-Platform` | `darwin-arm64` | Which platforms need testing/builds |
+| `X-KlaatAI-Install-Channel` | `npm` | Which install channel to fix when upgrades fail |
+| `X-KlaatAI-Install-Id` | random UUID | Counting installs — one chatty user is not a thousand installs |
+
+The install id is a **random** UUID generated once and stored in `~/.klaatai/install-id`. It is not derived from your machine — no hostname, no MAC address, no hardware hash — and it identifies an install, not a person or a device. Nothing about your project is ever included: no paths, no repo names, no file names, no prompt or code content. Coarse country/city is derived server-side from the connecting IP, the same as any web request.
+
+Opt out and no install id is sent at all, so no per-install record exists:
+
+```bash
+export KLAATAI_TELEMETRY=0     # or DO_NOT_TRACK=1
+```
+
+or in `~/.klaatai/config.json`:
+
+```json
+{ "telemetry": "off" }
+```
+
+Version and platform still travel when you opt out — the server needs them to refuse unsupported builds and route around version-specific bugs.
 
 ## How Authentication Works
 

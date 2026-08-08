@@ -1,8 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import {
+  classifyUpgradeFailure,
   detectInstallChannelFromPath,
   normalizeExePath,
+  repairPlanFor,
   spawnUpgradeCommand,
+  upgradeCommandArgv,
   windowsPowerShellExe,
 } from "./upgrade.js";
 
@@ -95,5 +98,71 @@ describe("spawnUpgradeCommand", () => {
     const res = spawnUpgradeCommand(["npm", "--version"]);
     expect(res.error).toBeUndefined();
     expect(res.status).toBe(0);
+  });
+});
+
+describe("upgradeCommandArgv", () => {
+  test("wraps npm in cmd.exe on Windows (npm is a .cmd shim)", () => {
+    expect(upgradeCommandArgv(["npm", "install", "-g", "klaatcode@latest"], "win32"))
+      .toEqual(["cmd.exe", "/d", "/s", "/c", "npm", "install", "-g", "klaatcode@latest"]);
+  });
+
+  test("leaves non-npm commands alone", () => {
+    expect(upgradeCommandArgv(["brew", "upgrade", "klaatcode"], "win32"))
+      .toEqual(["brew", "upgrade", "klaatcode"]);
+    expect(upgradeCommandArgv(["npm", "install"], "darwin"))
+      .toEqual(["npm", "install"]);
+  });
+});
+
+describe("classifyUpgradeFailure", () => {
+  test("permission errors", () => {
+    expect(classifyUpgradeFailure("npm ERR! code EACCES", 1)).toBe("permission");
+    expect(classifyUpgradeFailure("Error: Access is denied.", 1)).toBe("permission");
+  });
+
+  test("network errors", () => {
+    expect(classifyUpgradeFailure("npm ERR! network getaddrinfo ENOTFOUND registry.npmjs.org", 1))
+      .toBe("network");
+  });
+
+  test("missing package manager", () => {
+    expect(classifyUpgradeFailure("spawn npm ENOENT", null)).toBe("not-found");
+    expect(classifyUpgradeFailure("'brew' is not recognized as an internal command", 1))
+      .toBe("not-found");
+  });
+
+  test("anything else with an exit code is unknown", () => {
+    expect(classifyUpgradeFailure("npm ERR! Unexpected end of JSON input", 1)).toBe("unknown");
+  });
+
+  test("no exit code at all means the command never ran", () => {
+    expect(classifyUpgradeFailure("", null)).toBe("not-found");
+  });
+});
+
+describe("repairPlanFor", () => {
+  test("npm repair removes the retired klaatcode-ai package too", () => {
+    const plan = repairPlanFor("npm")!;
+    expect(plan.commands[0]).toEqual(["npm", "uninstall", "-g", "klaatcode", "klaatcode-ai"]);
+    expect(plan.commands[plan.commands.length - 1]).toEqual(["npm", "install", "-g", "klaatcode@latest"]);
+  });
+
+  test("installer repair wipes the install dir first", () => {
+    const plan = repairPlanFor("installer", "/Users/me")!;
+    expect(plan.removeDirs).toEqual(["/Users/me/.klaatcode"]);
+    expect(plan.commands).toHaveLength(1);
+  });
+
+  test("brew repair uninstalls then installs", () => {
+    const plan = repairPlanFor("brew")!;
+    expect(plan.commands[0]?.[1]).toBe("uninstall");
+    expect(plan.commands[1]?.[1]).toBe("install");
+  });
+
+  test("no repair for source / windows-installer / unknown", () => {
+    expect(repairPlanFor("source")).toBeNull();
+    expect(repairPlanFor("installer-windows")).toBeNull();
+    expect(repairPlanFor("unknown")).toBeNull();
   });
 });

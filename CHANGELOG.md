@@ -5,6 +5,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); version
 
 ## [Unreleased]
 
+## [2.4.3] — 2026-08-08
+
+### Added
+
+- **Update on launch** — `klaatcode` now checks for a newer release at startup and asks `Update now? [Y/n]` before doing anything else. Answer yes and it upgrades through whichever channel installed it, then relaunches with your original arguments; answer no and it won't ask again for that release. The check is cached 4h and fail-silent, so being offline never delays a launch.
+  - Skipped automatically in CI and any non-interactive shell (one stderr line instead of a prompt), and with `--no-update-check` or `KLAATAI_NO_UPDATE=1`.
+  - **Verified upgrades.** A zero exit code is no longer taken as proof: the CLI asks the installed binary for its version, and detects when a second copy on `PATH` (Homebrew over npm, or a leftover `klaatcode-ai` 1.x binary) is still winning.
+  - **Repair fallback.** If the upgrade fails or the version doesn't move, it runs a clean uninstall + reinstall for that channel — including removing the retired `klaatcode-ai` package — and prints exact manual commands if that still doesn't work. It never leaves you without a working CLI.
+  - **Minimum supported version.** `klaatai.com/api/latest` now serves a `minSupported` floor; below it the update is required rather than optional, and the server can refuse very old builds with an upgrade instruction. Bypass with `KLAATAI_SKIP_VERSION_GATE=1` at your own risk.
+- **Install identity headers** — every request now reports client version, platform (`darwin-arm64`), install channel, and a **random** install id stored in `~/.klaatai/install-id`, so we can see how many installs are live and which builds are still in the wild. The id is not derived from your machine and carries nothing about your project — no paths, repo names, or prompt content. Opt out with `KLAATAI_TELEMETRY=0`, `DO_NOT_TRACK=1`, or `"telemetry": "off"` in `~/.klaatai/config.json`; version and platform still travel so the server can refuse unsupported builds. See the README for the full table.
+
 ## [2.4.2] — 2026-08-03
 
 ### Fixed
