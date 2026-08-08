@@ -5,6 +5,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); version
 
 ## [Unreleased]
 
+## [2.4.4] — 2026-08-08
+
+### Fixed
+
+- **`multi_edit` no longer dies on redundant sub-edits** — if one edit in a batch has identical `old_string` and `new_string`, it is skipped and the rest apply. Previously a single no-op edit (e.g. 1/12) aborted the whole batch and stalled the turn.
+- **Rate-limit drops retry instead of killing the turn** — a 429 mid tool-loop now waits for the server's `retry_after` (capped at 30s) and auto-retries once, instead of falling through to a fatal error.
+- **Stream errors no longer leave raw `<tool_call>` XML on screen** — partial output from a dropped stream is masked the same way as live streaming, so a mid-block disconnect can't leave tool XML as the visible answer.
+- **Exploration promises get the same nudge as action promises** — "Let me read the rest of the file" with no tool call is now detected and nudged (read/check/inspect/search verbs), not only "I'll fix it" style promises.
+
 ## [2.4.3] — 2026-08-08
 
 ### Added
