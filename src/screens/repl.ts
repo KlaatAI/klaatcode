@@ -3776,10 +3776,14 @@ export async function runREPL(
             case "error": {
               const raw = chunk.error ?? "stream error";
               // Preserve whatever streamed before the drop — don't throw the
-              // partial answer away.
-              if (fullText.trim()) {
-                messages.push({ role: "assistant", content: fullText, model: lastModel, tier: lastTier, elapsed });
-                appendSessionMsg({ role: "assistant", content: fullText });
+              // partial answer away. Mask text-protocol tool XML: a stream that
+              // died mid <tool_call> block must not leave the raw XML as the
+              // visible answer (the server strips it on clean completions, but
+              // an error drop bypasses that).
+              const preserved = maskTextToolXmlForDisplay(fullText).trim();
+              if (preserved) {
+                messages.push({ role: "assistant", content: preserved, model: lastModel, tier: lastTier, elapsed });
+                appendSessionMsg({ role: "assistant", content: preserved });
               }
               const transient = /timed out|timeout|connection|network|reach the model|ECONNRESET|socket|fetch failed|502|503|504/i.test(raw);
               // Auto-retry once on a transient drop before surfacing anything.
