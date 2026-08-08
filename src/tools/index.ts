@@ -326,18 +326,36 @@ function multiEdit(args: MultiEditArgs, projectRoot: string): string {
   try {
     let content = readFileSync(absPath, "utf-8");
     let total = 0;
+    let applied = 0;
+    const skipped: number[] = [];
     for (let i = 0; i < args.edits.length; i++) {
       const e = args.edits[i]!;
       const result = replaceInContent(content, e.old_string, e.new_string, e.replace_all ?? false);
       if (!result.ok) {
+        // An "identical" sub-edit is a model redundancy, not a conflict — the
+        // file already reads exactly as intended there. Failing the whole
+        // batch for it threw away every good edit alongside it (seen live
+        // 2026-08-08: edit 1/12 identical killed 11 valid edits and the turn
+        // stalled). Skip it and keep going; real mismatches still abort.
+        if (result.reason === "identical") {
+          skipped.push(i + 1);
+          continue;
+        }
         return `Error: edit ${i + 1}/${args.edits.length} failed — ${describeEditFailure(result, args.path).replace(/^Error: /, "")} No changes were written.`;
       }
       content = result.content;
       total += result.occurrences;
+      applied++;
+    }
+    if (applied === 0) {
+      return `OK: No changes needed — all ${args.edits.length} edit${args.edits.length === 1 ? "" : "s"} were no-ops (old_string and new_string identical). The file already matches the intended state.`;
     }
     writeFileSync(absPath, content, "utf-8");
     recordFileRead(absPath);
-    return `OK: Applied ${args.edits.length} edits (${total} replacement${total === 1 ? "" : "s"}) in ${relative(projectRoot, absPath)}` +
+    const skippedNote = skipped.length
+      ? ` (${skipped.length} no-op edit${skipped.length === 1 ? "" : "s"} skipped: old_string equalled new_string)`
+      : "";
+    return `OK: Applied ${applied} edit${applied === 1 ? "" : "s"} (${total} replacement${total === 1 ? "" : "s"}) in ${relative(projectRoot, absPath)}${skippedNote}` +
       (runDiagnostics(absPath, projectRoot) ?? "") +
       impactNoteForEdit(absPath, projectRoot, args.edits.map(e => e.new_string).join("\n"));
   } catch (e) {

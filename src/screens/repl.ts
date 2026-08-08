@@ -3785,16 +3785,32 @@ export async function runREPL(
                 messages.push({ role: "assistant", content: preserved, model: lastModel, tier: lastTier, elapsed });
                 appendSessionMsg({ role: "assistant", content: preserved });
               }
-              const transient = /timed out|timeout|connection|network|reach the model|ECONNRESET|socket|fetch failed|502|503|504/i.test(raw);
+              const rateLimited = /429|too many requests|rate.?limit|sending requests too quickly/i.test(raw);
+              const transient = rateLimited ||
+                /timed out|timeout|connection|network|reach the model|ECONNRESET|socket|fetch failed|502|503|504/i.test(raw);
               // Auto-retry once on a transient drop before surfacing anything.
+              // A rate-limit is transient BY DEFINITION — the server even says how
+              // long to wait — but it used to fall through to the fatal path and
+              // kill the turn mid tool loop (seen live 2026-08-08). Honor the
+              // server's retry_after when present; cap the wait at 30s.
               if (transient && streamRetries < MAX_STREAM_RETRIES && !interrupted) {
                 streamRetries++;
-                messages.push({ role: "system", content: `⟳ Connection hiccup — retrying (${streamRetries}/${MAX_STREAM_RETRIES})…` });
+                let delayMs = 800;
+                if (rateLimited) {
+                  const m = /(?:wait|in|after[- ])(\d{1,3})\s*s/i.exec(raw) ?? /"retry_after_seconds"\s*:\s*(\d{1,3})/.exec(raw);
+                  delayMs = Math.min(Number(m?.[1] ?? 3), 30) * 1000;
+                }
+                messages.push({
+                  role: "system",
+                  content: rateLimited
+                    ? `⟳ Rate limited — waiting ${Math.round(delayMs / 1000)}s and retrying (${streamRetries}/${MAX_STREAM_RETRIES})…`
+                    : `⟳ Connection hiccup — retrying (${streamRetries}/${MAX_STREAM_RETRIES})…`,
+                });
                 chatLinesDirty = true;
                 streamBuffer = "";
                 fullText = "";
                 app.requestRender();
-                await new Promise(r => setTimeout(r, 800));
+                await new Promise(r => setTimeout(r, delayMs));
                 continue outerLoop;
               }
               // Give up: friendly, actionable message instead of a raw dump.

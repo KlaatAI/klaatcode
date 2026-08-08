@@ -15,7 +15,11 @@
 
 const VERB =
   "(?:fix|creat|rewrit|writ|updat|edit|run|rerun|start|restart|deploy|redeploy|" +
-  "implement|add|remov|build|rebuild|install|delet|mak|do|apply|generat|refactor|clean)";
+  "implement|add|remov|build|rebuild|install|delet|mak|do|apply|generat|refactor|clean|" +
+  // Exploration verbs — "Let me read the rest of the file." then a dead stop is
+  // the same unfulfilled promise as "I'll fix it" (seen live 2026-08-08, code
+  // tier). "know" is deliberately absent so "let me know" stays a handoff.
+  "read|re-read|reread|check|look|inspect|examin|verify|review|search|find|grep|scan|explor|open)";
 
 export const ACTION_PROMISE_RE = new RegExp(
   "\\b(?:" +

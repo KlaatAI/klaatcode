@@ -32,3 +32,13 @@ test("ordinary answers and summaries do not trigger", () => {
   )).toBe(false);
   expect(looksLikeUnfulfilledActionPromise("")).toBe(false);
 });
+
+test("exploration promises count too — seen live 2026-08-08", () => {
+  expect(looksLikeUnfulfilledActionPromise(
+    "Let me read the rest of the file to see the exact content."
+  )).toBe(true);
+  expect(looksLikeUnfulfilledActionPromise("I'll check the current state of flappy.html.")).toBe(true);
+  expect(looksLikeUnfulfilledActionPromise("Let me re-read that region first.")).toBe(true);
+  // "let me know" stays a legitimate handoff, not a promise
+  expect(looksLikeUnfulfilledActionPromise("Let me know when you've deployed it.")).toBe(false);
+});
