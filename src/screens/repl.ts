@@ -738,15 +738,24 @@ export async function runREPL(
 
   function openTierPicker(): void {
     const active = forceTier ?? "smart";
-    dialog.showList("Select Klaatu Tier", [
-      { label: `Auto · Smart Routing${active === "smart" ? "  ✓" : ""}`, value: "smart",  description: "Best tier selected for every request", color: "cyan" },
-      { label: `Klaatu Nano${active === "nano" ? "  ✓" : ""}`,          value: "nano",   description: "Instant answers · lowest cost",         color: "white" },
-      { label: `Klaatu Flash${active === "fast" ? "  ✓" : ""}`,         value: "fast",   description: "Fast, balanced everyday work",           color: "#34d399" },
-      { label: `Klaatu Core${active === "code" ? "  ✓" : ""}`,          value: "code",   description: "Production coding and implementation",    color: "#60a5fa" },
-      { label: `Klaatu Reason${active === "reason" ? "  ✓" : ""}`,      value: "reason", description: "Deep analysis and complex decisions",      color: "#c084fc" },
-      { label: `Klaatu Ultra${active === "heavy" ? "  ✓" : ""}`,        value: "heavy",  description: "Large, demanding engineering tasks",       color: "#f87171" },
-      { label: `Klaatu Titan${active === "titan" ? "  ✓" : ""}`,        value: "titan",  description: "Frontier intelligence · usage capped",     color: "#fb923c" },
-    ], (item) => {
+    // Display names come from KLAATU_MODEL_MAP (generated from tier-pricing.json) — this
+    // list used to re-type them, which is how "Klaatu Ultra"/"Klaatu Beast" drifted apart.
+    // Only the one-line descriptions and swatch colors are local to the picker.
+    const rows: { tier: string; description: string; color: string }[] = [
+      { tier: "smart",  description: "Best tier selected for every request",  color: "cyan" },
+      { tier: "nano",   description: "Instant answers · lowest cost",          color: "white" },
+      { tier: "fast",   description: "Fast, balanced everyday work",           color: "#34d399" },
+      { tier: "code",   description: "Production coding and implementation",   color: "#60a5fa" },
+      { tier: "reason", description: "Deep analysis and complex decisions",    color: "#c084fc" },
+      { tier: "heavy",  description: "Large, demanding engineering tasks",     color: "#f87171" },
+      { tier: "titan",  description: "Frontier intelligence · usage capped",   color: "#fb923c" },
+    ];
+    dialog.showList("Select Klaatu Tier", rows.map(({ tier, description, color }) => ({
+      label: `${tier === "smart" ? "Auto · Smart Routing" : KLAATU_MODEL_MAP[tier] ?? tierLabel(tier)}${active === tier ? "  ✓" : ""}`,
+      value: tier,
+      description,
+      color,
+    })), (item) => {
       if (item.value === "smart") {
         forceTier = null;
         pushSystemMsg("Smart routing restored — server auto-selects tier per request.");
@@ -1704,8 +1713,9 @@ export async function runREPL(
             completion: totalTokens.completion + chunk.usage.completion_tokens,
           };
           const tier = chunk.metadata?.tier ?? lastTier;
-          const [inp, out] = TIER_COSTS[tier] ?? [0.5, 1.5];
-          sessionCost += (chunk.usage.prompt_tokens * inp + chunk.usage.completion_tokens * out) / 1_000_000;
+          // costUsd() falls back to the generated default-tier rates — never a
+          // hand-typed pair, which is how sub-agent spend silently under-reported.
+          sessionCost += costUsd(chunk.usage.prompt_tokens, chunk.usage.completion_tokens, tier);
         }
       }
 
@@ -2129,12 +2139,19 @@ export async function runREPL(
             const rows = caps.map(c => {
               const usedToday = tierCounts.get(c.tier) ?? 0;
               const day = c.daily !== undefined ? `${c.daily}/day` : "—";
-              const mo = c.monthly !== undefined ? `${c.monthly}/mo` : "—";
-              return `  ${tierLabel(c.tier).padEnd(13)} ${day.padStart(8)} · ${mo.padStart(7)}` +
+              // Titan's monthly cap is CREDITS (2026-08-08), not requests — a
+              // bare "16/mo" would read as 16 turns when a flagship month buys 8.
+              const mo = c.monthly !== undefined
+                ? `${c.monthly}${c.monthlyIsCredits ? " cr" : ""}/mo` : "—";
+              return `  ${tierLabel(c.tier).padEnd(13)} ${day.padStart(8)} · ${mo.padStart(9)}` +
                      `   (${usedToday} this session)`;
             });
+            const creditsHelp = caps.some(c => c.monthlyIsCredits)
+              ? `\n  titan credits: 1× cheap frontier · 1.5× Kimi K3 · 2× Opus 5/Sol`
+              : "";
             quotaBlock += `\n\n**Premium limits** (${q.plan ?? "plan"}, resets ${monthlyResetLabel()}):\n` +
               rows.join("\n") +
+              creditsHelp +
               `\n  Past a limit the tier steps down instead of failing.`;
           }
         }
@@ -3583,10 +3600,9 @@ export async function runREPL(
       // the price is knowable up front. (Auto-routed turns can't be estimated
       // honestly: the server picks the tier per request.)
       if (forceTier && ["reason", "heavy", "titan"].includes(forceTier)) {
-        const [inp, out] = TIER_COSTS[forceTier] ?? [0, 0];
         const inTok = Math.max(lastContextSize, estimateContextTokens(currentApiMessages));
-        const lo = (inTok * inp +   500 * out) / 1_000_000;
-        const hi = (inTok * inp + 4_000 * out) / 1_000_000;
+        const lo = costUsd(inTok,   500, forceTier);
+        const hi = costUsd(inTok, 4_000, forceTier);
         if (hi >= 0.005) {
           messages.push({
             role: "system",
@@ -4168,8 +4184,7 @@ export async function runREPL(
             // tokens would have cost on the frontier (titan) baseline.
             if (turnUsage.cost > 0) {
               parts.push(fmtUsd(turnUsage.cost));
-              const [tin, tout] = TIER_COSTS["titan"] ?? [7.5, 37.5];
-              const titanCost = (turnUsage.prompt * tin + turnUsage.completion * tout) / 1_000_000;
+              const titanCost = costUsd(turnUsage.prompt, turnUsage.completion, "titan");
               const saved = titanCost - turnUsage.cost;
               if (saved >= 0.01) parts.push(`saved ${fmtUsd(saved)} vs frontier`);
             }
@@ -4363,8 +4378,7 @@ export async function runREPL(
             prompt:     totalTokens.prompt     + chunk.usage.prompt_tokens,
             completion: totalTokens.completion + chunk.usage.completion_tokens,
           };
-          const [inp, out] = TIER_COSTS["code"] ?? [0.5, 1.5];
-          const compactCost = (chunk.usage.prompt_tokens * inp + chunk.usage.completion_tokens * out) / 1_000_000;
+          const compactCost = costUsd(chunk.usage.prompt_tokens, chunk.usage.completion_tokens, "code");
           sessionCost += compactCost;
           recordTurnCost(compactCost);
         }

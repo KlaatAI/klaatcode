@@ -5,7 +5,8 @@
   "$mirrors": [
     "KlaatAi.CLI/src/data/tier-pricing.json",
     "KlaatAI.VSCode/src/data/tier-pricing.json",
-    "KlaatAi.Klaatu.UI/src/data/tier-pricing.json"
+    "KlaatAi.Klaatu.UI/src/data/tier-pricing.json",
+    "KlaatAI.API/tier-pricing.json"
   ],
   "$sync": "Mirrors are byte-identical GENERATED copies (each client bundles from its own root). After editing this file run: python3 scripts/sync_tier_pricing.py (use --check in CI). KlaatAI.Klaatu/tests/test_tier_pricing_contract.py asserts the gateway's _USER_COST_PER_MT / _UNIT_WEIGHTS_DEFAULT / cap tables match this file.",
   "$note": "Model/provider COST lives in model-pricing.json. This file is the sell side. Do not put provider cost here — clients must never display what we pay upstream.",
@@ -53,19 +54,37 @@
 
   "$planPriceNote": "Published monthly list price per seat. Lives here because the premium-cap budget is only meaningful against a price — the margin guard used to hardcode its own copy and drifted (it assumed Team $36 while we charge $30, so Team's ceilings were validated against revenue we don't collect). Must match Klaatu api/me_routes.py _PLAN_PRICE_USD and the subscription_plans table. Team is DELIBERATELY cheaper than Scale ($30 vs $32), so Team's caps must stay below Scale's.",
 
+  "$titanCreditsNote": "monthly.titan is denominated in CREDITS since 2026-08-08, not requests — each titan turn burns titan_credit_multipliers[served model] credits (unknown model = default). Values are the old request caps x2, so worst-case exposure is unchanged: an all-flagship month (2 cr/turn) buys exactly the old turn count, a cheap-frontier month up to 2x. daily.titan stays a plain request count (anti-abuse, not cost control). Gateway enforcement: api/quota.py TITAN CREDITS block; storage rides tier_usage_daily as the synthetic 'titan_credits' row.",
+  "titan_credit_multipliers": {
+    "default": 2.0,
+    "models": {
+      "grok-4.5": 1.0,
+      "qwen/qwen3.8-max": 1.0,
+      "gemini-3-pro": 1.0,
+      "mindai/macaron-v1-venti": 1.0,
+      "deepseek-v4-pro": 1.0,
+      "kimi-k3": 1.5,
+      "accounts/fireworks/models/kimi-k3": 1.5,
+      "moonshotai/kimi-k3": 1.5,
+      "claude-opus-5": 2.0,
+      "gpt-5.6-sol": 2.0,
+      "claude-fable-5": 4.0
+    }
+  },
+
   "plan_caps": {
     "free":    { "daily": {}, "monthly": {} },
-    "starter": { "daily": { "code": 12, "titan": 1 }, "monthly": { "titan": 3 } },
+    "starter": { "daily": { "code": 12, "titan": 1 }, "monthly": { "titan": 6 } },
     "pro":     { "daily": { "code": 25, "reason": 25, "heavy": 10, "titan": 2 },
-                 "monthly": { "reason": 75, "heavy": 20, "titan": 8 } },
+                 "monthly": { "reason": 75, "heavy": 20, "titan": 16 } },
     "scale":   { "daily": { "code": 50, "reason": 60, "heavy": 30, "titan": 4 },
-                 "monthly": { "reason": 175, "heavy": 50, "titan": 13 } },
+                 "monthly": { "reason": 175, "heavy": 50, "titan": 26 } },
     "team":    { "daily": { "code": 45, "reason": 50, "heavy": 25, "titan": 4 },
-                 "monthly": { "reason": 165, "heavy": 45, "titan": 12 } },
+                 "monthly": { "reason": 165, "heavy": 45, "titan": 24 } },
     "apex":    { "daily": { "code": 120, "reason": 150, "heavy": 80, "titan": 8 },
-                 "monthly": { "reason": 500, "heavy": 150, "titan": 48 } },
+                 "monthly": { "reason": 500, "heavy": 150, "titan": 96 } },
     "apex_max": { "daily": { "code": 240, "reason": 300, "heavy": 160, "titan": 16 },
-                 "monthly": { "reason": 1000, "heavy": 300, "titan": 96 } }
+                 "monthly": { "reason": 1000, "heavy": 300, "titan": 192 } }
   },
 
   "plan_daily_requests": {

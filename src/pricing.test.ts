@@ -10,6 +10,7 @@ import {
   premiumCaps,
   tierCap,
   tierLabel,
+  titanCreditMultipliers,
   tierUnitCost,
   tierUnitCostLabel,
   tierWeight,
@@ -95,6 +96,41 @@ describe("no source file re-hardcodes tier rates", () => {
       `tier→rate tables must live only in pricing.ts (generated from tier-pricing.json)`,
     ).toEqual([]);
   });
+
+  // The keyed-map guard above only sees `code: [0.50, 1.50]`. It never saw the OTHER
+  // shape the stale table survived in: a BARE TUPLE fallback next to a TIER_COSTS
+  // lookup — `TIER_COSTS[tier] ?? [0.5, 1.5]` in screens/repl.ts (sub-agent usage
+  // accounting and compaction cost, found 2026-08-08). Those are worse than a visible
+  // table: they only fire for a tier the generated file doesn't know about, so they
+  // under-report silently and never in a test run. Any hardcoded [in, out] pair is
+  // banned — costUsd() already falls back to the default tier's generated rates.
+  test("no bare [in, out] tuple fallback next to a TIER_COSTS lookup", async () => {
+    const { Glob } = await import("bun");
+    // `TIER_COSTS[...] ?? [<number>, ...` — a numeric-literal fallback pair.
+    const TUPLE_FALLBACK = /TIER_COSTS\s*\[[^\]]*\]\s*\?\?\s*\[\s*\d/;
+    const offenders: string[] = [];
+    for await (const file of new Glob("**/*.{ts,tsx}").scan({ cwd: import.meta.dir })) {
+      if (file.endsWith(".test.ts") || file.endsWith(".test.tsx")) continue;
+      if (file === "pricing.ts") continue;
+      const text = await Bun.file(`${import.meta.dir}/${file}`).text();
+      if (TUPLE_FALLBACK.test(text)) offenders.push(file);
+    }
+    expect(
+      offenders,
+      `these files fall back to a hardcoded [input, output] pair — call costUsd() instead, ` +
+      `it already falls back to the generated default-tier rates`,
+    ).toEqual([]);
+  });
+
+  test("the guard actually fires on the pattern it is meant to catch", () => {
+    // Regression insurance for the guard itself: the exact lines that shipped.
+    const TUPLE_FALLBACK = /TIER_COSTS\s*\[[^\]]*\]\s*\?\?\s*\[\s*\d/;
+    expect(TUPLE_FALLBACK.test(`const [inp, out] = TIER_COSTS[tier] ?? [0.5, 1.5];`)).toBe(true);
+    expect(TUPLE_FALLBACK.test(`const [inp, out] = TIER_COSTS["code"] ?? [0.5, 1.5];`)).toBe(true);
+    expect(TUPLE_FALLBACK.test(`const [i, o] = TIER_COSTS[forceTier] ?? [0, 0];`)).toBe(true);
+    // …and stays quiet on the legitimate shape: falling back to another generated row.
+    expect(TUPLE_FALLBACK.test(`const [inp, out] = TIER_COSTS[tier] ?? TIER_COSTS["code"];`)).toBe(false);
+  });
 });
 
 describe("weights", () => {
@@ -119,7 +155,7 @@ describe("premium caps", () => {
     expect(tierCap("pro", "heavy", "daily")).toBe(10);
     expect(tierCap("pro", "heavy", "monthly")).toBe(20);
     expect(tierCap("pro", "titan", "daily")).toBe(2);
-    expect(tierCap("pro", "titan", "monthly")).toBe(8);
+    expect(tierCap("pro", "titan", "monthly")).toBe(16); // CREDITS since 2026-08-08, not requests
   });
 
   test("uncapped combinations return undefined, not 0", () => {
@@ -130,7 +166,7 @@ describe("premium caps", () => {
   });
 
   test("plan lookup is case-insensitive", () => {
-    expect(tierCap("PRO", "titan", "monthly")).toBe(8);
+    expect(tierCap("PRO", "titan", "monthly")).toBe(16);
   });
 
   test("premiumCaps lists the expensive tiers first", () => {
@@ -142,6 +178,22 @@ describe("premium caps", () => {
 
   test("premiumCaps is empty for a plan with no premium access", () => {
     expect(premiumCaps("free")).toEqual([]);
+  });
+
+  test("titan monthly cap is flagged as credits, others as requests", () => {
+    const rows = premiumCaps("pro");
+    expect(rows.find(r => r.tier === "titan")?.monthlyIsCredits).toBe(true);
+    expect(rows.find(r => r.tier === "heavy")?.monthlyIsCredits).toBe(false);
+    expect(rows.find(r => r.tier === "reason")?.monthlyIsCredits).toBe(false);
+  });
+
+  test("titanCreditMultipliers exposes the burn table", () => {
+    const m = titanCreditMultipliers();
+    expect(m).not.toBeNull();
+    expect(m!.default).toBe(2.0);
+    expect(m!.models["kimi-k3"]).toBe(1.5);
+    expect(m!.models["grok-4.5"]).toBe(1.0);
+    expect(m!.models["claude-opus-5"]).toBe(2.0);
   });
 
   test("premium tier set matches the server's enforced set", () => {

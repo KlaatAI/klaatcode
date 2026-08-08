@@ -12,6 +12,8 @@
  * Do not reintroduce literals — edit the root tier-pricing.json and run
  * `python3 scripts/sync_tier_pricing.py`.
  */
+import tierPricing from "../data/tier-pricing.json";
+
 export {
   TIER_COSTS,
   TIER_WEIGHTS,
@@ -76,18 +78,20 @@ export const TIER_COLOR_MAP: Record<string, number | string> = {
   smart: 228,
 };
 
-/** Product-facing model name per tier. */
+/**
+ * Product-facing model name per tier.
+ *
+ * DERIVED from the generated table's `tiers[].label` — never re-typed. The hand-written
+ * copy that used to live here had drifted (`beast` read "Klaatu Ultra"; canonical is
+ * "Klaatu Beast"), so the same tier rendered under two names depending on the code path.
+ * `smart` is the only entry with no row in the table: it is the absence of a pinned tier.
+ */
 export const KLAATU_MODEL_MAP: Record<string, string> = {
-  nano:   "Klaatu Nano",
-  fast:   "Klaatu Flash",
-  code:   "Klaatu Core",
-  reason: "Klaatu Reason",
-  heavy:  "Klaatu Ultra",
-  titan:  "Klaatu Titan",
-  flash:  "Klaatu Flash",
-  core:   "Klaatu Core",
-  beast:  "Klaatu Ultra",
-  smart:  "Klaatu Auto",
+  ...Object.fromEntries(
+    Object.entries(tierPricing.tiers as Record<string, { label?: string }>)
+      .map(([tier, spec]) => [tier, spec.label ?? tier]),
+  ),
+  smart: "Klaatu Auto",
 };
 
 export function formatTok(n: number): string {

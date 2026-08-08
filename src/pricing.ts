@@ -34,7 +34,7 @@ export const TIER_COSTS: Record<string, [number, number]> = Object.fromEntries(
   Object.entries(TIERS).map(([tier, s]) => [tier, [s.input, s.output] as [number, number]]),
 );
 
-/** Weighted request units consumed per user turn (titan 10× a code turn). */
+/** Weighted request units consumed per user turn (titan up to 15× a code turn). */
 export const TIER_WEIGHTS: Record<string, number> = Object.fromEntries(
   Object.entries(TIERS).map(([tier, s]) => [tier, s.weight]),
 );
@@ -106,6 +106,28 @@ export function isExplicitOnly(tier: string | null | undefined): boolean {
   return !!(tier && TIERS[tier]?.explicit_only);
 }
 
+// ── Titan credits (2026-08-08) ──────────────────────────────────────────────
+// The monthly titan cap is denominated in CREDITS, not requests: each titan
+// turn burns titan_credit_multipliers[served model] credits (unknown model =
+// default). The DAILY titan cap stays a plain request count.
+export type TitanCreditMultipliers = {
+  default: number;
+  models: Record<string, number>;
+};
+
+const TITAN_CREDITS = (table as {
+  titan_credit_multipliers?: { default?: number; models?: Record<string, number> };
+}).titan_credit_multipliers;
+
+/**
+ * Credits one titan turn burns per served model, or null when the bundled
+ * table predates the credit denomination (then monthly titan caps are requests).
+ */
+export function titanCreditMultipliers(): TitanCreditMultipliers | null {
+  if (!TITAN_CREDITS || typeof TITAN_CREDITS.default !== "number") return null;
+  return { default: TITAN_CREDITS.default, models: TITAN_CREDITS.models ?? {} };
+}
+
 /** Dollar cost of one turn's tokens at a tier. Falls back to the default tier's rates. */
 export function costUsd(promptTokens: number, completionTokens: number, tier?: string | null): number {
   const [inp, out] = TIER_COSTS[tier ?? ""] ?? TIER_COSTS[DEFAULT_TIER];
@@ -122,16 +144,22 @@ export function tierCap(
   return caps?.[scope]?.[tier];
 }
 
-/** Premium caps for a plan, ordered most-expensive first (titan → heavy → reason). */
+/**
+ * Premium caps for a plan, ordered most-expensive first (titan → heavy → reason).
+ * `monthlyIsCredits` marks a monthly value denominated in credits (titan since
+ * 2026-08-08) rather than requests — render it "16 cr/mo", never "16/mo".
+ */
 export function premiumCaps(
   plan: string | null | undefined,
-): { tier: string; daily?: number; monthly?: number }[] {
+): { tier: string; daily?: number; monthly?: number; monthlyIsCredits: boolean }[] {
   const order = [...PREMIUM_TIERS].sort((a, b) => tierWeight(b) - tierWeight(a));
+  const creditsActive = titanCreditMultipliers() !== null;
   return order
     .map(tier => ({
       tier,
       daily: tierCap(plan, tier, "daily"),
       monthly: tierCap(plan, tier, "monthly"),
+      monthlyIsCredits: tier === "titan" && creditsActive,
     }))
     .filter(row => row.daily !== undefined || row.monthly !== undefined);
 }

@@ -6,6 +6,7 @@ import {
 import { KlaatAIClient } from "../api/client.js";
 import { TOOL_DEFINITIONS } from "../tools/index.js";
 import { dialectForTier } from "../tools/dialects.js";
+import TIER_PRICING from "../data/tier-pricing.json";
 
 const EDITOR_TIERS = ["nano", "fast", "code", "reason", "heavy", "titan"];
 
@@ -49,4 +50,25 @@ test("titan is explicit-request only — never offered as a delegate_task tier",
 
 test("titan gets the full tool dialect", () => {
   expect(dialectForTier("titan")).toBe("full");
+});
+
+// KLAATU_MODEL_MAP used to be hand-typed and had drifted: `beast` read "Klaatu Ultra"
+// while the canonical label is "Klaatu Beast", so the same tier rendered under two
+// names depending on which code path drew it. The map is now derived from the
+// generated table — this pins it so nobody re-types it.
+test("display names come from the generated labels, not a second copy", () => {
+  for (const [tier, label] of Object.entries(TIER_PRICING.tiers)) {
+    expect(KLAATU_MODEL_MAP[tier], `${tier} label`).toBe((label as { label: string }).label);
+  }
+  expect(KLAATU_MODEL_MAP["beast"]).toBe("Klaatu Beast");
+  expect(KLAATU_MODEL_MAP["heavy"]).toBe("Klaatu Ultra");
+  expect(KLAATU_MODEL_MAP["fast"]).toBe("Klaatu Flash");
+  // `smart` is the absence of a pinned tier, so it has no row in the table.
+  expect(KLAATU_MODEL_MAP["smart"]).toBe("Klaatu Auto");
+});
+
+test("every tier the picker offers has a display name", () => {
+  for (const t of [...EDITOR_TIERS, "smart"]) {
+    expect(KLAATU_MODEL_MAP[t], `${t} is offered by /tier`).toBeTruthy();
+  }
 });
