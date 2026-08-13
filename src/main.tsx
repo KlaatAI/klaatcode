@@ -32,6 +32,13 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { spawnSync as _openBrowser } from "node:child_process";
 import { version as VERSION } from "../package.json";
 import { loadProjectRules } from "./agent/system-prompt.js";
+import {
+  configureTelemetry,
+  emit as emitEvent,
+  flushTelemetry,
+  installTelemetryExitHook,
+} from "./utils/telemetry.js";
+import { sessionStartedPayload } from "./utils/repo-fingerprint.js";
 import { costUsd } from "./pricing.js";
 import { runAcpServer } from "./acp/agent.js";
 import { runHeadlessAgent } from "./agent/headless-agent.js";
@@ -183,7 +190,27 @@ async function boot(opts: { baseUrl?: string; dir?: string; resumeId?: string; n
   };
 
   const client = new KlaatAIClient({ apiKey, baseUrl, onAuthExpired });
+
+  // ── Layer 1 telemetry ───────────────────────────────────────────────────────
+  // The token is read lazily, so a refresh mid-session is picked up automatically
+  // rather than pinning the emitter to a token that expires.
+  configureTelemetry(() => (client.token ? { baseUrl, token: client.token } : null));
+  installTelemetryExitHook();
+  // session.started: the repo fingerprint is free, deterministic, and a far better
+  // per-project prior than anything extracted from a conversation. Nothing here
+  // identifies the repo — no path, no name, no remote; the branch is hashed.
+  const fingerprint = sessionStartedPayload(projectRoot);
+  if (fingerprint) {
+    emitEvent({
+      event_type: "session.started",
+      project_id: fingerprint.projectId,
+      payload: fingerprint.payload,
+    });
+  }
+
   const sessionResult = await runREPL(app, client, { ...config, baseUrl }, projectRoot, { theme, resumeId: opts.resumeId });
+
+  await flushTelemetry();
 
   // REPL finished — clean up
   app.quit();

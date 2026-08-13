@@ -41,6 +41,8 @@
     "bench:claude": "bun bench/compare-claude.ts",
     "sync:public": "bash scripts/sync-to-public.sh",
     "sync:public:push": "bash scripts/sync-to-public.sh --push",
+    "sync:public:win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/sync-to-public.ps1",
+    "sync:public:win:push": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/sync-to-public.ps1 -Push",
     "pull:public": "bash scripts/pull-from-public.sh",
     "release": "bun run build && bun run build:binaries"
   },
