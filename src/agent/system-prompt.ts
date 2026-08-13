@@ -14,17 +14,36 @@
 import { execSync } from "node:child_process";
 import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
 import type { Message } from "../api/client.js";
+import { loadConfig, loadCredentials } from "../auth/credentials.js";
+import { version as VERSION } from "../../package.json";
 
 export const CORE_SYSTEM_PROMPT = `You are Klaat Code, an AI coding agent that operates in the user's terminal. You help with software engineering tasks: fixing bugs, adding features, refactoring, explaining code, and running commands.
+
+# Identity
+
+You are Klaat Code, running on KlaatAI's routing gateway. KlaatAI picks the best model for each turn from many providers, so the specific model behind any given reply varies and you are NOT told which one it is.
+
+If asked what model you are: say you are Klaat Code on KlaatAI, and that the underlying model is chosen per-request by the router. Then point at the real answer — the tier is shown in the status line above each reply, and \`/cost\` lists the tier and model actually served.
+
+NEVER claim to be a specific named model or a specific vendor's assistant. Do not say you are Claude, GPT, Gemini, Llama, or any other product, and do not name Anthropic, OpenAI, or Google as your maker. You genuinely do not know which model is answering, so any such claim is a guess — and guessing wrong misrepresents what the user is paying for. Saying "I don't know which model this turn used, here's how to check" is correct and expected.
+
+# Session questions
+
+Questions about THIS session — which account is logged in, login state, plan, quota, CLI version, connection — are answered from the "Session" lines in the Environment block below, or by pointing at the matching command (\`/whoami\`, \`/cost\`, \`klaatai login\`). They are questions about the CLI itself, NOT about the user's project: do not read project files, .env files, or configs to answer them. If the Environment block lacks the detail, say so and name the command that shows it.
 
 # How you work
 
 You act through tools. Prefer acting over describing: when the user asks for a change, make it with tools, then briefly report what you changed. Keep responses short — this is a terminal, not a chat room. No preamble, no recap of what you are about to do, no flattery.
 
+You ALWAYS have filesystem and shell access through your tools (read_file, run_command, …). NEVER tell the user you "don't have access to the filesystem", "can't run commands", or ask them to run a command and paste the output — run it yourself with run_command. If a tool list is not visible to you this turn, still assume the capability exists and attempt the tool call.
+
 # Tool policy
 
 - ALWAYS read a file (read_file) before editing it (edit_file). Never edit blind.
+- NEVER guess file paths. Only read paths you have actually seen — in a directory listing, glob/grep result, graph query, or the Environment block. Projects rarely follow textbook layouts; a "File not found" means your mental model is wrong, so list the real directory (the error shows it) instead of trying another invented path.
+- When an MCP server offers tools that overlap with built-ins (reading files, listing directories, searching), prefer the built-in tools — they are faster, tracked for freshness/undo, and permission-scoped. Use MCP tools only for capabilities the built-ins lack.
 - Use edit_file for surgical changes to existing files; multi_edit for several changes to the same file (atomic); write_file only for new files or full rewrites.
 - CODE GRAPH FIRST — this project is indexed into a code graph; use it as your primary navigation tool:
   - For any task that touches more than one file, call plan_exploration FIRST with the task text — it returns the optimal file-read order (what to outline, what to read, which section). Follow the plan instead of reading files in discovery order.
@@ -85,10 +104,30 @@ function topLevel(projectRoot: string): string {
   }
 }
 
+/** Session identity — who is logged in, on what CLI, against what backend. */
+function sessionInfo(): string {
+  try {
+    if (process.env["KLAATAI_API_KEY"]) {
+      return "Session: authenticated via KLAATAI_API_KEY env var (account details not available here — /whoami shows them)";
+    }
+    const creds = loadCredentials();
+    const who = creds.email
+      ? creds.email
+      : creds.accessToken
+        ? "signed in (email not on record — /whoami shows it)"
+        : "NOT signed in — run `klaatai login`";
+    const base = loadConfig().baseUrl;
+    return `Session: Klaat Code CLI v${VERSION} · account ${who} · backend ${base}`;
+  } catch {
+    return "Session: account state unavailable — /whoami shows it";
+  }
+}
+
 /** Environment block — computed once per session, stable within it. */
 export function buildEnvironmentBlock(projectRoot: string, ledgerPath?: string): string {
   const lines = [
     "# Environment",
+    sessionInfo(),
     `Working directory: ${projectRoot}`,
     `Platform: ${process.platform} (${process.arch})`,
     `Date: ${new Date().toISOString().slice(0, 10)}`,
@@ -103,18 +142,67 @@ export function buildEnvironmentBlock(projectRoot: string, ledgerPath?: string):
   return lines.join("\n");
 }
 
-/** Project rules from .klaatai/rules.md or AGENTS.md, if present. */
+/** Total budget for concatenated rules files (matches Codex's AGENTS.md cap). */
+const PROJECT_RULES_MAX_BYTES = 32 * 1024;
+
+/**
+ * Project rules — layered AGENTS.md discovery (industry-standard semantics):
+ *   1. Global ~/.klaatai/AGENTS.md (user-wide defaults)
+ *   2. Git root → projectRoot chain, one file per directory, first match of
+ *      .klaatai/rules.md → AGENTS.md → CLAUDE.md
+ * Concatenated root-downward so closer files come later and win on conflict.
+ * Total capped at 32KiB; empty files skipped.
+ */
 export function loadProjectRules(projectRoot: string): string | null {
-  for (const rel of [join(".klaatai", "rules.md"), "AGENTS.md", "CLAUDE.md"]) {
-    const p = join(projectRoot, rel);
-    if (existsSync(p)) {
+  const CANDIDATES = [join(".klaatai", "rules.md"), "AGENTS.md", "CLAUDE.md"];
+
+  const readRules = (dir: string): { rel: string; content: string } | null => {
+    for (const rel of CANDIDATES) {
+      const p = join(dir, rel);
+      if (!existsSync(p)) continue;
       try {
         const content = readFileSync(p, "utf-8").trim();
-        if (content) return `# Project rules (from ${rel})\n\n${content}`;
+        if (content) return { rel: join(dir, rel), content };
       } catch { /* try next */ }
     }
+    return null;
+  };
+
+  // Directory chain: git root (if inside a repo and above projectRoot) → … → projectRoot.
+  const chain: string[] = [];
+  let gitRoot: string | null = null;
+  try {
+    gitRoot = execSync("git rev-parse --show-toplevel", {
+      cwd: projectRoot, encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"],
+    }).trim() || null;
+  } catch { /* not a repo */ }
+  if (gitRoot && projectRoot.startsWith(gitRoot) && gitRoot !== projectRoot) {
+    let dir = projectRoot;
+    while (dir.length >= gitRoot.length) {
+      chain.unshift(dir);
+      if (dir === gitRoot) break;
+      const parent = join(dir, "..");
+      if (parent === dir) break;
+      dir = parent;
+    }
+  } else {
+    chain.push(projectRoot);
   }
-  return null;
+
+  const sections: string[] = [];
+  const globalRules = readRules(join(homedir(), ".klaatai"));
+  if (globalRules) sections.push(`# Global rules (from ~/.klaatai/${globalRules.rel.split("/").pop()})\n\n${globalRules.content}`);
+  for (const dir of chain) {
+    const r = readRules(dir);
+    if (r) sections.push(`# Project rules (from ${r.rel})\n\n${r.content}`);
+  }
+  if (sections.length === 0) return null;
+
+  let out = sections.join("\n\n");
+  if (Buffer.byteLength(out, "utf-8") > PROJECT_RULES_MAX_BYTES) {
+    out = out.slice(0, PROJECT_RULES_MAX_BYTES) + "\n\n[project rules truncated at 32KiB]";
+  }
+  return out;
 }
 
 /**

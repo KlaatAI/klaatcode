@@ -25,14 +25,21 @@ import { getValidAuthToken, forceRefreshToken } from "./auth/refresh.js";
 import { startOAuthBrowserAuth } from "./auth/browser.js";
 import { runSplash } from "./screens/splash.js";
 import { runREPL } from "./screens/repl.js";
-import { readFileSync, existsSync, statSync, readdirSync } from "node:fs";
+import { runSessionPicker } from "./screens/session-picker.js";
+import { existsSync, statSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { homedir } from "node:os";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { spawnSync as _openBrowser } from "node:child_process";
 import { version as VERSION } from "../package.json";
 import { loadProjectRules } from "./agent/system-prompt.js";
+import { costUsd } from "./pricing.js";
 import { runAcpServer } from "./acp/agent.js";
+import { runHeadlessAgent } from "./agent/headless-agent.js";
+import { TOOL_DEFINITIONS } from "./tools/index.js";
+import {
+  EXIT, encodeEvent, validateSchema, extractJson, schemaInstruction,
+  type JsonSchema, type HeadlessEvent,
+} from "./agent/headless-contract.js";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -60,141 +67,15 @@ function deriveWebUrl(baseUrl: string): string {
 }
 
 /**
- * Pre-boot session picker: full-screen interactive list with search.
- * Shown when user runs `klaatcode -r` without an ID.
- * Returns the selected session ID or null to start fresh.
- */
-async function runSessionPicker(): Promise<string | null> {
-  const SESSION_DIR = join(homedir(), ".klaatai", "sessions");
-  let sessions: { id: string; date: string; preview: string }[] = [];
-  try {
-    sessions = readdirSync(SESSION_DIR)
-      .filter(f => f.endsWith(".jsonl"))
-      .sort().reverse().slice(0, 50)
-      .map(f => {
-        const id = f.replace(".jsonl", "");
-        try {
-          const lines = readFileSync(join(SESSION_DIR, f), "utf-8").trim().split("\n").filter(Boolean);
-          const firstUser = lines.map(l => JSON.parse(l)).find((m: any) => m.role === "user");
-          const preview = ((firstUser?.content as string) ?? "(empty)").slice(0, 80);
-          const date = id.slice(0, 16).replace("T", " ").replace(/-/g, (m, i) => i < 10 ? "-" : ":");
-          return { id, date, preview };
-        } catch {
-          return { id, date: id.slice(0, 16), preview: "(unreadable)" };
-        }
-      });
-  } catch { /* no sessions dir */ }
-
-  if (sessions.length === 0) {
-    process.stdout.write("\x1b[2mNo saved sessions found. Starting fresh.\x1b[0m\n");
-    return null;
-  }
-
-  // Enter raw mode for interactive selection
-  const { stdin, stdout } = process;
-  stdin.setRawMode(true);
-  stdin.resume();
-  stdin.setEncoding("utf-8");
-
-  let cursor = 0;
-  let search = "";
-  let filtered = sessions;
-
-  function filterSessions(): void {
-    if (!search) { filtered = sessions; return; }
-    const q = search.toLowerCase();
-    filtered = sessions.filter(s => s.preview.toLowerCase().includes(q) || s.id.includes(q) || s.date.includes(q));
-  }
-
-  function render(): void {
-    stdout.write("\x1b[2J\x1b[H"); // clear screen, cursor to top
-    const dim = "\x1b[2m";
-    const reset = "\x1b[0m";
-    const bold = "\x1b[1m";
-    const cyan = "\x1b[36m";
-    const accent = "\x1b[38;5;141m";
-    const white = "\x1b[37m";
-
-    stdout.write(`${accent}${bold}  ⏵ Resume Session${reset}\n`);
-    stdout.write(`${dim}  ─────────────────────────────────────────${reset}\n`);
-    stdout.write(`  ${cyan}Search:${reset} ${search}${dim}│${reset}\n`);
-    stdout.write(`${dim}  ─────────────────────────────────────────${reset}\n\n`);
-
-    const rows = Math.min(filtered.length, (process.stdout.rows || 24) - 8);
-    const start = Math.max(0, cursor - rows + 3);
-    for (let i = start; i < start + rows && i < filtered.length; i++) {
-      const s = filtered[i]!;
-      const isFocused = i === cursor;
-      const marker = isFocused ? `${accent}❯${reset}` : " ";
-      const datePart = s.date.slice(5, 16);
-      const previewPart = s.preview.slice(0, (process.stdout.columns || 80) - 25);
-      if (isFocused) {
-        stdout.write(`  ${marker} ${bold}${white}${datePart}${reset}  ${previewPart}\n`);
-      } else {
-        stdout.write(`  ${marker} ${dim}${datePart}${reset}  ${dim}${previewPart}${reset}\n`);
-      }
-    }
-
-    stdout.write(`\n${dim}  ↑↓ navigate · enter select · esc start fresh · type to search${reset}\n`);
-  }
-
-  render();
-
-  return new Promise<string | null>((resolveP) => {
-    function cleanup(): void {
-      stdin.setRawMode(false);
-      stdin.pause();
-      stdout.write("\x1b[2J\x1b[H"); // clear screen
-    }
-
-    stdin.on("data", (key: string) => {
-      if (key === "\x1b" || key === "\x03") {
-        // Escape or Ctrl+C — start fresh
-        cleanup();
-        resolveP(null);
-        return;
-      }
-      if (key === "\r" || key === "\n") {
-        // Enter — select
-        cleanup();
-        resolveP(filtered[cursor]?.id ?? null);
-        return;
-      }
-      if (key === "\x1b[A") {
-        // Up arrow
-        cursor = Math.max(0, cursor - 1);
-        render();
-        return;
-      }
-      if (key === "\x1b[B") {
-        // Down arrow
-        cursor = Math.min(filtered.length - 1, cursor + 1);
-        render();
-        return;
-      }
-      if (key === "\x7f" || key === "\b") {
-        // Backspace
-        search = search.slice(0, -1);
-        filterSessions();
-        cursor = 0;
-        render();
-        return;
-      }
-      // Printable character — add to search
-      if (key.length === 1 && key.charCodeAt(0) >= 32) {
-        search += key;
-        filterSessions();
-        cursor = 0;
-        render();
-      }
-    });
-  });
-}
-
-/**
  * Full boot sequence: Splash → auth (if needed) → Welcome → REPL.
  */
-async function boot(opts: { baseUrl?: string; dir?: string; resumeId?: string } = {}): Promise<void> {
+async function boot(opts: { baseUrl?: string; dir?: string; resumeId?: string; noUpdateCheck?: boolean } = {}): Promise<void> {
+  // ── 0. Update gate (before the TUI owns the terminal) ─────────────────────
+  // Asks Y/n when a newer release exists, force-updates below the supported
+  // floor, and re-execs the new binary on success. Fail-silent when offline.
+  const { runUpdateGate } = await import("./commands/update-gate.js");
+  await runUpdateGate({ noUpdateCheck: opts.noUpdateCheck });
+
   // ── Session picker (runs before TUI when `klaatcode -r` with no ID) ───────
   if (opts.resumeId === "pick") {
     const picked = await runSessionPicker();
@@ -234,45 +115,19 @@ async function boot(opts: { baseUrl?: string; dir?: string; resumeId?: string } 
 
   // ── 2. Show Splash ─────────────────────────────────────────────────────────
   const splash = await runSplash(app, { status: "Initializing…", projectPath: projectRoot, accent: getPalette(theme).accent, version: VERSION });
-  await sleep(300);
 
   // ── 3. Resolve API key ─────────────────────────────────────────────────────
+  // Connectivity is NOT checked here — the REPL opens immediately and pings
+  // in the background, surfacing offline state in its status bar. The only
+  // thing worth blocking on is having a token at all.
   splash.setSplashStatus("Checking credentials…");
   let apiKey: string | null =
     process.env["KLAATAI_API_KEY"] ??
     await getValidAuthToken();
 
-  if (apiKey) {
-    splash.setSplashStatus("Connecting to KlaatAI…");
-    const pingClient = new KlaatAIClient({ apiKey, baseUrl });
-    let connected = false;
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        await pingClient.ping(8_000);
-        connected = true;
-        break;
-      } catch {
-        if (attempt < 3) {
-          splash.setSplashStatus(`Retrying connection… (${attempt}/3)`);
-          await sleep(1500);
-        }
-      }
-    }
-    if (connected) {
-      splash.setSplashStatus("Connected — loading workspace…");
-      await sleep(600);
-    } else {
-      splash.setSplashStatus("Could not reach KlaatAI. Check your internet and try again.");
-      await sleep(3000);
-      splash.unmount();
-      app.quit();
-      await appDone;
-      process.exit(1);
-    }
-  } else {
+  if (!apiKey) {
     // ── 4. Browser auth: OAuth (subscription JWT) only. ───────────────────────
     splash.setSplashStatus("Opening browser to sign in…");
-    await sleep(600);
 
     const oauthCreds = await startOAuthBrowserAuth(webUrl, baseUrl, splash.setSplashStatus, 120_000);
     if (oauthCreds?.accessToken) {
@@ -288,9 +143,6 @@ async function boot(opts: { baseUrl?: string; dir?: string; resumeId?: string } 
       await appDone;
       process.exit(1);
     }
-
-    splash.setSplashStatus("Signed in — loading workspace…");
-    await sleep(600);
   }
 
   splash.unmount();
@@ -353,7 +205,11 @@ async function boot(opts: { baseUrl?: string; dir?: string; resumeId?: string } 
 const program = new Command();
 
 program
-  .name("klaatai")
+  // MUST match the shipped binary name, not the source package name. Every
+  // install channel installs `klaatcode` (publish-npm.ts launcher, install.ts
+  // BIN_NAME, brew formula) — naming this "klaatai" made every "run `klaatai
+  // upgrade`" hint in help + the update notice a command-not-found.
+  .name("klaatcode")
   .description("KlaatAI CLI — AI coding assistant with smart model routing")
   .version(VERSION, "-v, --version", "Print version and exit");
 
@@ -366,11 +222,12 @@ program
   .option("--base-url <url>", "API base URL override")
   .option("-r, --resume [id]", "Resume a previous session (shows picker if no id)")
   .option("--continue", "Alias for --resume (resume last session)")
-  .action(async (dir: string | undefined, opts: { baseUrl?: string; resume?: string | boolean; continue?: boolean }) => {
+  .option("--no-update-check", "Skip the startup update check/prompt")
+  .action(async (dir: string | undefined, opts: { baseUrl?: string; resume?: string | boolean; continue?: boolean; updateCheck?: boolean }) => {
     const resumeId = opts.continue ? "last" :
       opts.resume === true ? "pick" :
       (typeof opts.resume === "string" ? opts.resume : undefined);
-    await boot({ ...opts, dir, resumeId });
+    await boot({ ...opts, dir, resumeId, noUpdateCheck: opts.updateCheck === false });
   });
 
 // ── klaatai run (non-interactive / headless) ──────────────────────────────────
@@ -383,75 +240,161 @@ program
  *   klaatai run --model fast "Summarise this file" < file.ts
  *   echo "Explain this" | klaatai run -
  */
+/** Filter the tool set for an unattended run. Categories keep the allowlist
+ *  human-writable in CI; "all" is the default, "none" ⇒ pure chat completion. */
+function selectHeadlessTools(spec: string | undefined): { tools: typeof TOOL_DEFINITIONS; readOnly: boolean } {
+  if (!spec || spec === "all") return { tools: TOOL_DEFINITIONS, readOnly: false };
+  if (spec === "none") return { tools: [], readOnly: true };
+  const CATEGORY: Record<string, (name: string) => boolean> = {
+    read: n => ["read_file", "list_dir", "glob", "grep", "file_outline", "project_graph_query", "project_semantic_search", "impact_check", "plan_exploration"].includes(n),
+    edit: n => ["write_file", "edit_file", "multi_edit", "apply_patch"].includes(n),
+    shell: n => ["run_command", "shell_output", "shell_kill"].includes(n),
+    search: n => ["grep", "glob", "list_dir", "web_search", "web_fetch"].includes(n),
+    web: n => ["web_search", "web_fetch"].includes(n),
+  };
+  const wanted = spec.split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
+  const byName = new Set(wanted); // also allow explicit tool names
+  const tools = TOOL_DEFINITIONS.filter(t => {
+    const n = t.function.name;
+    return byName.has(n) || wanted.some(w => CATEGORY[w]?.(n));
+  });
+  const readOnly = !wanted.some(w => w === "edit" || w === "shell");
+  return { tools, readOnly };
+}
+
 async function runHeadless(opts: {
   prompt: string;
   baseUrl?: string;
   model?: string;
   system?: string;
   maxCost?: string;
+  json?: boolean;
+  outputSchema?: string;
+  outputLastMessage?: string;
+  allowTools?: string;
+  noTools?: boolean;
+  maxTurns?: string;
 }): Promise<void> {
+  // Scripted runs get told about an update on stderr, never prompted.
+  const { runUpdateGate } = await import("./commands/update-gate.js");
+  await runUpdateGate({ neverPrompt: true });
+
   const config  = loadConfig();
   const baseUrl = opts.baseUrl ?? config.baseUrl;
-  // Subscription JWT (or KLAATAI_API_KEY env override for CI/headless).
   const apiKey  = process.env["KLAATAI_API_KEY"] ?? await getValidAuthToken();
 
   if (!apiKey) {
-    process.stderr.write("Not signed in. Run: klaatai login\n");
-    process.exit(1);
+    process.stderr.write("Not signed in. Set KLAATAI_API_KEY or run: klaatai login\n");
+    process.exit(EXIT.GENERIC);
   }
 
   const client = new KlaatAIClient({ apiKey, baseUrl });
   const projectRoot = process.cwd();
+  const emit = (ev: HeadlessEvent) => { if (opts.json) process.stdout.write(encodeEvent(ev)); };
 
-  // Build messages — include project rules if present
+  // Load + parse the output schema (if any) up front so a bad path fails fast.
+  let schema: JsonSchema | null = null;
+  if (opts.outputSchema) {
+    try {
+      schema = JSON.parse(readFileSync(opts.outputSchema, "utf-8")) as JsonSchema;
+    } catch (e) {
+      process.stderr.write(`Invalid --output-schema file: ${e instanceof Error ? e.message : String(e)}\n`);
+      process.exit(EXIT.GENERIC);
+    }
+  }
+
+  // Build seed messages: project rules + optional system + the task (+ schema).
   const messages: Message[] = [];
   const rules = loadProjectRules(projectRoot);
   if (rules) messages.push({ role: "system", content: rules });
-  if (opts.system) {
-    messages.push({ role: "system", content: opts.system });
-  }
-  messages.push({ role: "user", content: opts.prompt });
+  if (opts.system) messages.push({ role: "system", content: opts.system });
+  messages.push({ role: "user", content: opts.prompt + (schema ? schemaInstruction(schema) : "") });
 
-  // 9.4: --max-cost guard for CI/cron use — abort once reported usage crosses it.
+  const { tools } = opts.noTools ? { tools: [] } : selectHeadlessTools(opts.allowTools);
   const maxCost = opts.maxCost ? Number(opts.maxCost) : 0;
-  let runCost = 0;
-  const RUN_TIER_COSTS: Record<string, [number, number]> = {
-    nano: [0.10, 0.20], fast: [0.25, 0.75], code: [0.50, 1.50],
-    reason: [1.00, 3.00], heavy: [2.50, 8.00],
-  };
+  const maxTurns = opts.maxTurns ? Number(opts.maxTurns) : undefined;
+  emit({ type: "start", prompt: opts.prompt, tier: opts.model, tools: tools.length });
 
-  try {
-    for await (const chunk of client.chatStream(messages, { tier: opts.model })) {
-      if (chunk.type === "token" && chunk.text) {
-        process.stdout.write(chunk.text);
-      } else if (chunk.type === "metadata" && chunk.metadata && chunk.usage) {
-        const [inp, out] = RUN_TIER_COSTS[chunk.metadata.tier] ?? [0.5, 1.5];
-        runCost += (chunk.usage.prompt_tokens * inp + chunk.usage.completion_tokens * out) / 1_000_000;
-        if (maxCost > 0 && runCost >= maxCost) {
-          process.stderr.write(`\nStopped: --max-cost $${maxCost} reached ($${runCost.toFixed(4)} spent).\n`);
-          process.exit(3);
-        }
-      } else if (chunk.type === "error") {
-        process.stderr.write(`\nError: ${chunk.error}\n`);
-        process.exit(1);
-      }
+  const result = await runHeadlessAgent(client, messages, projectRoot, {
+    tools,
+    tier: opts.model,
+    maxTurns,
+    maxCostUsd: maxCost > 0 ? maxCost : undefined,
+    now: () => Date.now(),
+    onProgress: (ev) => {
+      if (!opts.json) return;
+      if (ev.kind === "tool") emit({ type: "tool", name: ev.detail ?? "tool" });
+      else if (ev.kind === "turn") emit({ type: "turn", n: 0 });
+    },
+  });
+
+  // Structured output: extract + validate JSON from the final message. One
+  // corrective retry, then fail with a clear code so CI doesn't consume garbage.
+  let data: unknown = undefined;
+  if (schema) {
+    let parsed = extractJson(result.finalText);
+    let errs = parsed === null ? ["no JSON found in final message"] : validateSchema(parsed, schema);
+    if (errs.length > 0) {
+      const retry = await runHeadlessAgent(client, [
+        ...messages,
+        { role: "assistant", content: result.finalText },
+        { role: "user", content: `Your output did not match the schema (${errs.slice(0, 3).join("; ")}). Reply with ONLY the corrected JSON, nothing else.` },
+      ], projectRoot, { tools: [], tier: opts.model, now: () => Date.now() });
+      parsed = extractJson(retry.finalText);
+      errs = parsed === null ? ["no JSON found after retry"] : validateSchema(parsed, schema);
+      result.finalText = retry.finalText;
     }
-    process.stdout.write("\n");
-  } catch (err) {
-    process.stderr.write(`\nError: ${err instanceof Error ? err.message : String(err)}\n`);
-    process.exit(1);
+    if (errs.length > 0) {
+      emit({ type: "result", ok: false, stoppedBy: "bad_schema", cost: result.costUsd, error: errs.join("; ") });
+      if (!opts.json) process.stderr.write(`Output did not match schema: ${errs.join("; ")}\n`);
+      process.exit(EXIT.TASK_FAILED);
+    }
+    data = parsed;
   }
+
+  if (opts.outputLastMessage) {
+    try { writeFileSync(opts.outputLastMessage, schema ? JSON.stringify(data, null, 2) : result.finalText); }
+    catch (e) { process.stderr.write(`Could not write --output-last-message: ${e instanceof Error ? e.message : String(e)}\n`); }
+  }
+
+  const totalCost = result.costUsd + result.estCostUsd;
+  emit({ type: "cost", usd: totalCost, tokens: { prompt: result.promptTokens, completion: result.completionTokens } });
+
+  const ok = result.stoppedBy === "done";
+  emit({ type: "result", ok, text: schema ? undefined : result.finalText, data, stoppedBy: result.stoppedBy, cost: totalCost, error: result.error });
+
+  // Human/plain output when not in --json mode.
+  if (!opts.json) {
+    process.stdout.write((schema ? JSON.stringify(data, null, 2) : result.finalText) + "\n");
+    if (!ok) process.stderr.write(`\n[${result.stoppedBy}] ${result.error ?? ""}\n`);
+  }
+
+  // Deterministic exit code.
+  const code =
+    ok ? EXIT.OK :
+    result.stoppedBy === "max_cost" ? EXIT.COST_CAP :
+    result.stoppedBy === "error" ? EXIT.GENERIC :
+    EXIT.TASK_FAILED;
+  process.exit(code);
 }
 
 program
   .command("run [prompt]")
-  .description("Run a single prompt non-interactively and stream output to stdout")
+  .description("Run a task non-interactively (agentic). For scripts & CI: JSON events, schema output, exit codes.")
   .option("--base-url <url>", "API base URL override")
-  .option("--model <tier>", "Force routing tier (nano/fast/code/reason/heavy)")
+  .option("--model <tier>", "Force routing tier (nano/fast/code/reason/heavy/titan)")
   .option("--system <text>", "Prepend a system message before the prompt")
-  .option("--max-cost <usd>", "Abort when estimated cost reaches this USD amount (exit code 3)")
+  .option("--max-cost <usd>", "Abort when cost reaches this USD amount (exit code 3)")
+  .option("--json", "Emit a JSONL event stream (start/tool/turn/cost/result) instead of prose")
+  .option("--output-schema <file>", "Force the final answer to match this JSON Schema file (validated; exit 2 on mismatch)")
+  .option("--output-last-message <file>", "Write the final answer (or validated JSON) to this file")
+  .option("--allow-tools <spec>", "Comma list of tool names or categories (read,edit,shell,search,web,all,none). Default: all")
+  .option("--no-tools", "Pure chat completion — no agent loop, no tools")
+  .option("--max-turns <n>", "Max agent tool-rounds before stopping")
   .action(async (promptArg: string | undefined, opts: {
     baseUrl?: string; model?: string; system?: string; maxCost?: string;
+    json?: boolean; outputSchema?: string; outputLastMessage?: string;
+    allowTools?: string; tools?: boolean; maxTurns?: string;
   }) => {
     // Support piped stdin: klaatai run - (or klaatai run with stdin piped)
     let prompt = promptArg;
@@ -465,12 +408,13 @@ program
     }
     if (!prompt) {
       process.stderr.write("Usage: klaatai run <prompt>\n       klaatai run -  (reads from stdin)\n");
-      process.exit(1);
+      process.exit(EXIT.GENERIC);
     }
-    await runHeadless({ ...opts, prompt });
+    // commander maps --no-tools to opts.tools === false.
+    await runHeadless({ ...opts, prompt, noTools: opts.tools === false });
   });
 
-// ── klaatai upgrade ───────────────────────────────────────────────────────────
+// ── klaatcode upgrade ─────────────────────────────────────────────────────────
 
 program
   .command("upgrade")

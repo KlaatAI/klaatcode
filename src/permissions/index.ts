@@ -144,6 +144,60 @@ function matchesPattern(subject: string, pattern: string): boolean {
   return new RegExp(`^${escaped}$`, "i").test(subject.trim());
 }
 
+/**
+ * Split a shell command into chained sub-commands (&&, ||, ;, |), respecting
+ * quotes. Returns null when the command uses constructs we can't safely
+ * decompose (redirects, substitution, backgrounding, unbalanced quotes) —
+ * callers must treat those as opaque and never glob-match them.
+ *
+ * Why: pattern "cat *" must NOT auto-allow "cat x; sudo rm -rf /" — each
+ * chained sub-command has to pass the allowlist on its own.
+ */
+export function splitShellChain(cmd: string): string[] | null {
+  const parts: string[] = [];
+  let cur = "";
+  let q: '"' | "'" | null = null;
+  for (let i = 0; i < cmd.length; i++) {
+    const c = cmd[i]!;
+    if (q) {
+      cur += c;
+      if (c === q) q = null;
+      continue;
+    }
+    if (c === '"' || c === "'") { q = c; cur += c; continue; }
+    if (c === ">" || c === "<" || c === "`") return null;
+    if (c === "$" && cmd[i + 1] === "(") return null;
+    if (c === "&" && cmd[i + 1] === "&") { parts.push(cur); cur = ""; i++; continue; }
+    if (c === "|" && cmd[i + 1] === "|") { parts.push(cur); cur = ""; i++; continue; }
+    if (c === "|" || c === ";") { parts.push(cur); cur = ""; continue; }
+    if (c === "&") return null; // backgrounding — opaque
+    cur += c;
+  }
+  if (q) return null; // unbalanced quote — opaque
+  parts.push(cur);
+  const out = parts.map(p => p.trim()).filter(Boolean);
+  return out.length > 0 ? out : null;
+}
+
+/**
+ * Durable prefix patterns for an approved command (Codex-style "always allow
+ * `git push` again"). Two-token prefix + glob per chained sub-command, e.g.
+ * "bun test src/x.test.ts" → ["bun test", "bun test *"]. Opaque commands
+ * (redirects etc.) get only their exact string.
+ */
+export function prefixPatternsFor(cmd: string): string[] {
+  const subs = splitShellChain(cmd);
+  if (!subs) return [cmd.trim()];
+  const out: string[] = [];
+  for (const sub of subs) {
+    const toks = sub.split(/\s+/).filter(Boolean);
+    const head = toks.slice(0, 2).join(" ");
+    out.push(head);
+    out.push(`${head} *`);
+  }
+  return [...new Set(out)];
+}
+
 // ─── Core logic ───────────────────────────────────────────────────────────────
 
 /**
@@ -167,28 +221,41 @@ export function checkPermission(
   // Tier 2: tools the user has permanently trusted
   if (perms.trusted_tools.includes(tool)) return "allow";
 
-  // Tier 3: run_command — pattern match against allow/deny lists
+  // Tier 3: run_command — pattern match against allow/deny lists.
+  // Chains are split (&&, ;, |) and EVERY sub-command must pass on its own;
+  // opaque commands (redirects, substitution) only match exact entries.
   if (tool === "run_command") {
     let args: { command?: string } = {};
     try { args = JSON.parse(tc.function.arguments) as { command?: string }; } catch { /* */ }
     const cmd = args.command ?? "";
 
-    // Deny list takes priority
-    for (const pattern of perms.denied_commands) {
-      if (matchesPattern(cmd, pattern)) return "deny";
+    const subs  = splitShellChain(cmd);
+    const units = subs ?? [cmd];
+
+    // Deny list takes priority — whole string AND each sub-command
+    for (const unit of [cmd, ...units]) {
+      for (const pattern of perms.denied_commands) {
+        if (matchesPattern(unit, pattern)) return "deny";
+      }
     }
-    for (const pattern of perms.allowed_commands) {
-      if (matchesPattern(cmd, pattern)) return "allow";
+
+    if (!subs) {
+      // Opaque — glob allowlist entries don't apply; exact match only.
+      return perms.allowed_commands.some(p => p.trim() === cmd.trim()) ? "allow" : "ask";
     }
+const allAllowed = subs.every(sub =>
+      perms.allowed_commands.some(p => matchesPattern(sub, p)));
+    const native = allAllowed ? "allow" : "ask";
+    if (native !== "ask") return native;
     // Native config has no opinion — fall through to imported rules below.
   }
-
   // Compat: .claude/settings.json permissions.allow/deny/ask. Our native
   // config (tiers 1-3 above) always outranks this — it's only consulted
   // when the native model would otherwise ask.
   if (importedRules) {
     const imported = checkImportedRules(tc, importedRules);
     if (imported) return imported;
+  
   }
 
   // write_file / edit_file — not permanently trusted, ask
@@ -209,8 +276,11 @@ export function persistAlwaysAllow(tc: ToolCall): void {
     let args: { command?: string } = {};
     try { args = JSON.parse(tc.function.arguments) as { command?: string }; } catch { return; }
     const cmd = args.command ?? "";
-    if (cmd && !perms.allowed_commands.includes(cmd)) {
-      perms.allowed_commands = [cmd, ...perms.allowed_commands];
+    if (cmd) {
+      // Durable prefix rules — "always" on `bun test x` allows `bun test *`
+      // next time (per chained sub-command; opaque commands stay exact).
+      const fresh = prefixPatternsFor(cmd).filter(p => !perms.allowed_commands.includes(p));
+      perms.allowed_commands = [...fresh, ...perms.allowed_commands];
     }
   } else {
     if (!perms.trusted_tools.includes(tool)) {
@@ -293,11 +363,14 @@ export function summarizeTool(tc: ToolCall): string {
       default: {
         // MCP and other tools: extract meaningful arg (url, path, query, name)
         const meaningful = args["url"] ?? args["path"] ?? args["query"] ?? args["name"] ?? args["uri"] ?? null;
-        if (meaningful) {
-          const val = String(meaningful);
-          return `${tc.function.name}  ${val.length > 55 ? val.slice(0, 52) + "…" : val}`;
+        const val = meaningful !== null ? String(meaningful) : "";
+        // "mcp__filesystem__read_multiple_files" → "mcp:filesystem  read_multiple_files <arg>"
+        const mcpM = /^mcp__([^_]+(?:_[^_]+)*?)__(.+)$/i.exec(tc.function.name);
+        const label = mcpM ? `mcp:${mcpM[1]}  ${mcpM[2]}` : tc.function.name;
+        if (val) {
+          return `${label}  ${val.length > 55 ? val.slice(0, 52) + "…" : val}`;
         }
-        return tc.function.name;
+        return label;
       }
     }
   } catch {

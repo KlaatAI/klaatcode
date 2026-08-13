@@ -63,6 +63,19 @@ export interface Config {
   maxSessionCost?: number;
   /** Per-phase soft token budgets (9.5): "on" (default) or "off". */
   phaseBudgets?: "on" | "off";
+  /** Terminal notifications (OSC9 + bell) when a long turn finishes or the
+   *  agent needs approval: "on" (default) or "off". */
+  notifications?: "on" | "off";
+  /** Proof-of-work verify after a turn that edited files:
+   *  "off" (default), "types" (typecheck only — fast), "full" (typecheck + tests).
+   *  `/verify` always runs the full check on demand regardless of this. */
+  verify?: "off" | "types" | "full";
+  /**
+   * Install-level telemetry (random install id + version/platform heartbeat
+   * used by the admin client dashboard): "on" (default) or "off". Env override:
+   * KLAATAI_TELEMETRY=0. See utils/client-identity.ts for exactly what is sent.
+   */
+  telemetry?: "on" | "off";
   /** Cross-tool compatibility toggles. */
   compat?: {
     /** Discover skills from ~/.claude/skills and .claude/skills (default: true). */

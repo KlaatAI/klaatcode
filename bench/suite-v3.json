@@ -1,0 +1,358 @@
+{
+  "name": "klaatcode-bench-v3",
+  "description": "50 harder self-contained coding tasks with objective pass/fail verifiers. Heavy long-context weight (15 tasks, 12-25 file fixtures). Categories: bugfix (subtle/async/unicode/tz), implement (real algorithms), long-context bug hunts, multi-file refactors, refactor, spec-parsing. Run with BENCH_SUITE=suite-v3.json.",
+  "verify": "bun test",
+  "solutionsDir": "solutions-v3",
+  "tasks": [
+    {
+      "id": "fix-race-cache-stampede",
+      "dir": "tasks-v3/fix-race-cache-stampede",
+      "prompt": "memoizeAsync in src/memo.ts is supposed to deduplicate concurrent calls with the same key (one underlying fetch per key while in flight), but the tests in src/memo.test.ts show the loader firing multiple times under concurrency. Fix src/memo.ts so all tests pass. Do not edit the test file.",
+      "difficulty": "hard",
+      "category": "bugfix"
+    },
+    {
+      "id": "fix-tz-dst-boundary",
+      "dir": "tasks-v3/fix-tz-dst-boundary",
+      "prompt": "dailyBuckets in src/buckets.ts groups timestamps into local calendar days for a fixed UTC offset, but tests in src/buckets.test.ts fail around day boundaries. Fix the bucketing logic so all tests pass. Do not edit the test file.",
+      "difficulty": "medium",
+      "category": "bugfix"
+    },
+    {
+      "id": "fix-grapheme-slice",
+      "dir": "tasks-v3/fix-grapheme-slice",
+      "prompt": "truncateDisplay in src/truncate.ts must never split a user-perceived character (emoji, ZWJ sequences, combining marks, flags). Tests in src/truncate.test.ts fail. Fix src/truncate.ts so all tests pass. Do not edit the test file.",
+      "difficulty": "hard",
+      "category": "bugfix"
+    },
+    {
+      "id": "fix-float-ledger",
+      "dir": "tasks-v3/fix-float-ledger",
+      "prompt": "The ledger in src/ledger.ts accumulates floating-point error across many small transactions and its balances drift off by cents; src/ledger.test.ts fails. Fix the money handling so all tests pass. Do not edit the test file.",
+      "difficulty": "medium",
+      "category": "bugfix"
+    },
+    {
+      "id": "fix-lru-ttl-interaction",
+      "dir": "tasks-v3/fix-lru-ttl-interaction",
+      "prompt": "The LRU+TTL cache in src/cache.ts mishandles the interaction between recency updates and expiry (expired entries still count as recent, gets don't refresh recency correctly). Fix src/cache.ts so src/cache.test.ts passes. Do not edit the test file.",
+      "difficulty": "medium",
+      "category": "bugfix"
+    },
+    {
+      "id": "fix-debounce-semantics",
+      "dir": "tasks-v3/fix-debounce-semantics",
+      "prompt": "debounce in src/debounce.ts supports {leading, trailing} options but the semantics are wrong (leading call swallowed, trailing fires with stale args, cancel doesn't). Fix src/debounce.ts so src/debounce.test.ts passes. Do not edit the test file.",
+      "difficulty": "medium",
+      "category": "bugfix"
+    },
+    {
+      "id": "fix-retry-backoff-cap",
+      "dir": "tasks-v3/fix-retry-backoff-cap",
+      "prompt": "retryWithBackoff in src/retry.ts computes exponential delays that overflow / ignore maxDelay and retries non-retryable errors. Fix src/retry.ts so src/retry.test.ts passes. Do not edit the test file.",
+      "difficulty": "medium",
+      "category": "bugfix"
+    },
+    {
+      "id": "fix-queue-backpressure",
+      "dir": "tasks-v3/fix-queue-backpressure",
+      "prompt": "The bounded task queue in src/queue.ts must run at most `concurrency` jobs at once, preserve completion-order guarantees described in the tests, and reject when full — but src/queue.test.ts fails. Fix src/queue.ts. Do not edit the test file.",
+      "difficulty": "hard",
+      "category": "bugfix"
+    },
+    {
+      "id": "fix-path-normalize",
+      "dir": "tasks-v3/fix-path-normalize",
+      "prompt": "safeJoin in src/paths.ts is meant to confine resolved paths inside a root directory, but tests in src/paths.test.ts show escapes via '..', mixed separators, and encoded segments. Fix src/paths.ts so all tests pass. Do not edit the test file.",
+      "difficulty": "medium",
+      "category": "bugfix"
+    },
+    {
+      "id": "fix-deep-merge",
+      "dir": "tasks-v3/fix-deep-merge",
+      "prompt": "deepMerge in src/merge.ts corrupts arrays, merges __proto__/constructor keys, and shares references between input and output. Fix src/merge.ts so src/merge.test.ts passes. Do not edit the test file.",
+      "difficulty": "medium",
+      "category": "bugfix"
+    },
+    {
+      "id": "implement-cron-next",
+      "dir": "tasks-v3/implement-cron-next",
+      "prompt": "Implement nextRun in src/cron.ts: given a 5-field cron expression (min hour dom month dow, supporting *, lists, ranges, steps) and a Date, return the next matching Date strictly after it. Spec in the stub comment; tests in src/cron.test.ts. Do not edit the test file.",
+      "difficulty": "hard",
+      "category": "implement"
+    },
+    {
+      "id": "implement-glob-match",
+      "dir": "tasks-v3/implement-glob-match",
+      "prompt": "Implement globMatch in src/glob.ts supporting *, ?, **, {a,b} alternation and [abc] classes per the stub spec. Tests in src/glob.test.ts. Do not edit the test file.",
+      "difficulty": "hard",
+      "category": "implement"
+    },
+    {
+      "id": "implement-token-bucket",
+      "dir": "tasks-v3/implement-token-bucket",
+      "prompt": "Implement the TokenBucket rate limiter in src/ratelimit.ts (capacity, refill rate, injectable clock, tryTake(n), msUntilAvailable(n)) per the stub spec. Tests in src/ratelimit.test.ts. Do not edit the test file.",
+      "difficulty": "medium",
+      "category": "implement"
+    },
+    {
+      "id": "implement-topo-cycles",
+      "dir": "tasks-v3/implement-topo-cycles",
+      "prompt": "Implement topoSort in src/topo.ts: deterministic topological order (lexicographic tie-break) and, on cycles, throw CycleError carrying one concrete cycle path per the stub spec. Tests in src/topo.test.ts. Do not edit the test file.",
+      "difficulty": "medium",
+      "category": "implement"
+    },
+    {
+      "id": "implement-line-diff",
+      "dir": "tasks-v3/implement-line-diff",
+      "prompt": "Implement diffLines in src/diff.ts producing a minimal edit script (equal/insert/delete ops) between two string arrays per the stub spec (LCS-based). Tests in src/diff.test.ts. Do not edit the test file.",
+      "difficulty": "hard",
+      "category": "implement"
+    },
+    {
+      "id": "implement-json-stream",
+      "dir": "tasks-v3/implement-json-stream",
+      "prompt": "Implement the incremental JSON value scanner in src/jstream.ts: feed(chunk) accepts arbitrary chunk boundaries of a stream of whitespace-separated JSON values and emits each complete value; handles strings with escapes, nesting, and numbers split across chunks. Spec in stub; tests in src/jstream.test.ts. Do not edit the test file.",
+      "difficulty": "hard",
+      "category": "implement"
+    },
+    {
+      "id": "implement-interval-ops",
+      "dir": "tasks-v3/implement-interval-ops",
+      "prompt": "Implement the interval set operations in src/intervals.ts (normalize, union, intersect, subtract, freeSlots within bounds) per the stub spec. Tests in src/intervals.test.ts. Do not edit the test file.",
+      "difficulty": "medium",
+      "category": "implement"
+    },
+    {
+      "id": "implement-word-wrap",
+      "dir": "tasks-v3/implement-word-wrap",
+      "prompt": "Implement wrapText in src/wrap.ts: width-aware word wrap that preserves existing newlines, breaks overlong words with a hyphen, collapses trailing spaces, per the stub spec. Tests in src/wrap.test.ts. Do not edit the test file.",
+      "difficulty": "medium",
+      "category": "implement"
+    },
+    {
+      "id": "implement-semver-range",
+      "dir": "tasks-v3/implement-semver-range",
+      "prompt": "Implement satisfies(version, range) in src/semver.ts supporting exact, ^, ~, >=, <=, >, <, hyphen ranges and || alternatives (no prerelease handling) per the stub spec. Tests in src/semver.test.ts. Do not edit the test file.",
+      "difficulty": "medium",
+      "category": "implement"
+    },
+    {
+      "id": "implement-csv-rfc",
+      "dir": "tasks-v3/implement-csv-rfc",
+      "prompt": "Implement parseCsv in src/csv.ts per RFC 4180: quoted fields, escaped quotes, embedded newlines and commas, CRLF handling, ragged-row error reporting with line numbers, per the stub spec. Tests in src/csv.test.ts. Do not edit the test file.",
+      "difficulty": "medium",
+      "category": "implement"
+    },
+    {
+      "id": "longctx-invoice-rounding",
+      "dir": "tasks-v3/longctx-invoice-rounding",
+      "prompt": "Invoice totals come out a cent off for some carts (see failing tests in src/billing/invoice.test.ts). The bug is somewhere in the pricing/billing pipeline — find it and fix it. Do not edit test files.",
+      "difficulty": "hard",
+      "category": "long-context"
+    },
+    {
+      "id": "longctx-flag-precedence",
+      "dir": "tasks-v3/longctx-flag-precedence",
+      "prompt": "Feature flag resolution must honor precedence user override > org override > environment default > global default, but the failing tests in src/flags/resolve.test.ts show the wrong value winning in some cases. Find and fix the bug. Do not edit test files.",
+      "difficulty": "hard",
+      "category": "long-context"
+    },
+    {
+      "id": "longctx-cache-invalidation",
+      "dir": "tasks-v3/longctx-cache-invalidation",
+      "prompt": "Stale data is served after certain writes (failing tests in src/store/consistency.test.ts). One write path fails to invalidate/version the cache like the others do. Find and fix it. Do not edit test files.",
+      "difficulty": "hard",
+      "category": "long-context"
+    },
+    {
+      "id": "longctx-tz-report",
+      "dir": "tasks-v3/longctx-tz-report",
+      "prompt": "The daily-active report is off by small counts near midnight (failing tests in src/analytics/report.test.ts). Somewhere in the analytics pipeline local time and UTC are mixed. Find and fix the inconsistency. Do not edit test files.",
+      "difficulty": "hard",
+      "category": "long-context"
+    },
+    {
+      "id": "longctx-permission-matrix",
+      "dir": "tasks-v3/longctx-permission-matrix",
+      "prompt": "One route in the API layer enforces permissions incorrectly (failing tests in src/api/authz.test.ts — viewers can modify something they shouldn't). Audit the route handlers and fix the broken check. Do not edit test files.",
+      "difficulty": "medium",
+      "category": "long-context"
+    },
+    {
+      "id": "longctx-event-order",
+      "dir": "tasks-v3/longctx-event-order",
+      "prompt": "Downstream projections receive events in the wrong order under certain sequences (failing tests in src/events/projection.test.ts). One publisher violates the bus's ordering contract. Find and fix it. Do not edit test files.",
+      "difficulty": "hard",
+      "category": "long-context"
+    },
+    {
+      "id": "longctx-pagination-cursor",
+      "dir": "tasks-v3/longctx-pagination-cursor",
+      "prompt": "Paginated listings skip or duplicate items across pages (failing tests in src/repo/pagination.test.ts). One repository method mixes offset and cursor semantics. Find and fix it. Do not edit test files.",
+      "difficulty": "medium",
+      "category": "long-context"
+    },
+    {
+      "id": "longctx-retry-idempotency",
+      "dir": "tasks-v3/longctx-retry-idempotency",
+      "prompt": "Retried payment submissions can double-charge (failing tests in src/payments/idempotency.test.ts). The retry path misses the idempotency mechanism the rest of the pipeline uses. Find and fix it. Do not edit test files.",
+      "difficulty": "hard",
+      "category": "long-context"
+    },
+    {
+      "id": "longctx-unit-conversion",
+      "dir": "tasks-v3/longctx-unit-conversion",
+      "prompt": "Shipping quotes are wrong for some parcels (failing tests in src/shipping/quote.test.ts). One module in the pipeline mixes metric and imperial units. Find and fix it. Do not edit test files.",
+      "difficulty": "medium",
+      "category": "long-context"
+    },
+    {
+      "id": "longctx-schema-migration",
+      "dir": "tasks-v3/longctx-schema-migration",
+      "prompt": "After a field rename in the user model, one code path still reads the old field and returns undefined (failing tests in src/users/profile.test.ts). Find the stale reader and fix it consistently with the rest of the codebase. Do not edit test files.",
+      "difficulty": "medium",
+      "category": "long-context"
+    },
+    {
+      "id": "longctx-dead-config-path",
+      "dir": "tasks-v3/longctx-dead-config-path",
+      "prompt": "A deprecated configuration source is still consulted and overrides the documented one in some cases (failing tests in src/config/load.test.ts). Find where the dead path leaks in and fix resolution to match the documented order. Do not edit test files.",
+      "difficulty": "medium",
+      "category": "long-context"
+    },
+    {
+      "id": "longctx-currency-minor-units",
+      "dir": "tasks-v3/longctx-currency-minor-units",
+      "prompt": "Amounts in zero-decimal currencies (JPY, KRW) display and sum wrong in one part of the app (failing tests in src/money/format.test.ts). Find the formatter/aggregator that hardcodes 2 decimal places and fix it using the currency table the rest of the code uses. Do not edit test files.",
+      "difficulty": "medium",
+      "category": "long-context"
+    },
+    {
+      "id": "longctx-limiter-shared-state",
+      "dir": "tasks-v3/longctx-limiter-shared-state",
+      "prompt": "Rate limiting meant to be per-user throttles all users together under load (failing tests in src/middleware/limits.test.ts). Find the accidentally shared state and fix it. Do not edit test files.",
+      "difficulty": "medium",
+      "category": "long-context"
+    },
+    {
+      "id": "longctx-log-redaction",
+      "dir": "tasks-v3/longctx-log-redaction",
+      "prompt": "One logging path emits unredacted PII while all others redact (failing tests in src/logging/redact.test.ts). Find the path that bypasses redaction and fix it consistently. Do not edit test files.",
+      "difficulty": "medium",
+      "category": "long-context"
+    },
+    {
+      "id": "longctx-ranking-tiebreak",
+      "dir": "tasks-v3/longctx-ranking-tiebreak",
+      "prompt": "Search results with equal scores come back in unstable/wrong order between calls (failing tests in src/search/rank.test.ts). Find the comparator at fault in the ranking pipeline and fix the documented tie-break. Do not edit test files.",
+      "difficulty": "medium",
+      "category": "long-context"
+    },
+    {
+      "id": "multi-extract-validation",
+      "dir": "tasks-v3/multi-extract-validation",
+      "prompt": "Three modules duplicate subtly-different validation logic; the new shared module src/validation/core.ts (currently a stub) must become the single source of truth and all three call sites must use it. Tests in src/validation/core.test.ts and the three modules' tests must pass. Do not edit test files.",
+      "difficulty": "medium",
+      "category": "multi-file"
+    },
+    {
+      "id": "multi-rename-ripple",
+      "dir": "tasks-v3/multi-rename-ripple",
+      "prompt": "The domain type 'Shipment' was renamed to 'Consignment' in src/domain/types.ts but the rest of the codebase still references the old name/fields, so nothing compiles and tests fail. Complete the rename across all files. Tests in src/. Do not edit test files.",
+      "difficulty": "medium",
+      "category": "multi-file"
+    },
+    {
+      "id": "multi-di-storage",
+      "dir": "tasks-v3/multi-di-storage",
+      "prompt": "Modules call the concrete FileStore directly, making the failing tests (which inject a fake store via the new Storage interface in src/storage/iface.ts) impossible to pass. Refactor call sites to accept the injected interface. Do not edit test files.",
+      "difficulty": "hard",
+      "category": "multi-file"
+    },
+    {
+      "id": "multi-error-taxonomy",
+      "dir": "tasks-v3/multi-error-taxonomy",
+      "prompt": "Introduce the typed error hierarchy stubbed in src/errors/taxonomy.ts (NotFound, Conflict, Validation, Upstream) and make the service modules throw/propagate them so the failing handler tests (which assert on error types and HTTP mappings) pass. Do not edit test files.",
+      "difficulty": "medium",
+      "category": "multi-file"
+    },
+    {
+      "id": "multi-config-layers",
+      "dir": "tasks-v3/multi-config-layers",
+      "prompt": "Split the monolithic config loader so defaults, file, and env layers live in separate modules composed by src/config/index.ts, with the merge/precedence behavior the failing tests in src/config/index.test.ts specify. Do not edit test files.",
+      "difficulty": "medium",
+      "category": "multi-file"
+    },
+    {
+      "id": "multi-api-v2-shim",
+      "dir": "tasks-v3/multi-api-v2-shim",
+      "prompt": "Add the v2 API handlers (new response envelope, renamed fields) in src/api/v2/ reusing v1 business logic without duplicating it, per the failing tests in src/api/v2/handlers.test.ts. v1 tests must keep passing. Do not edit test files.",
+      "difficulty": "hard",
+      "category": "multi-file"
+    },
+    {
+      "id": "multi-circular-break",
+      "dir": "tasks-v3/multi-circular-break",
+      "prompt": "A circular import between modules leaves one binding undefined at runtime (failing tests in src/). Restructure the modules to break the cycle without changing public behavior. Do not edit test files.",
+      "difficulty": "hard",
+      "category": "multi-file"
+    },
+    {
+      "id": "multi-fixture-builder",
+      "dir": "tasks-v3/multi-fixture-builder",
+      "prompt": "Implement the test-data builder stubbed in src/testkit/builder.ts (fluent, immutable steps, sensible defaults, cross-entity references) that the failing tests across several modules rely on. Do not edit test files.",
+      "difficulty": "medium",
+      "category": "multi-file"
+    },
+    {
+      "id": "refactor-callbacks-async",
+      "dir": "tasks-v3/refactor-callbacks-async",
+      "prompt": "src/pipeline.ts is nested error-first callbacks. Convert it to async/await with the exact same observable behavior (ordering, error propagation, partial-failure semantics) so the new async tests in src/pipeline.test.ts pass. Do not edit test files.",
+      "difficulty": "medium",
+      "category": "refactor"
+    },
+    {
+      "id": "refactor-class-to-fns",
+      "dir": "tasks-v3/refactor-class-to-fns",
+      "prompt": "Replace the stateful ReportBuilder class with the pure-function API stubbed in src/report/fn.ts (same outputs, no shared mutable state), making the failing tests pass while the legacy class tests keep passing via the compatibility wrapper. Do not edit test files.",
+      "difficulty": "medium",
+      "category": "refactor"
+    },
+    {
+      "id": "refactor-table-driven",
+      "dir": "tasks-v3/refactor-table-driven",
+      "prompt": "Five near-identical webhook handlers differ only in field mapping and validation; the failing tests specify a single table-driven dispatcher in src/webhooks/dispatch.ts. Refactor to it, preserving each handler's behavior exactly. Do not edit test files.",
+      "difficulty": "medium",
+      "category": "refactor"
+    },
+    {
+      "id": "refactor-normalize-errors",
+      "dir": "tasks-v3/refactor-normalize-errors",
+      "prompt": "src/importer.ts mixes thrown strings, error codes, and null returns. The failing tests specify one Result-based API (ok/err with typed reasons). Refactor the module to it, preserving decision logic exactly. Do not edit test files.",
+      "difficulty": "medium",
+      "category": "refactor"
+    },
+    {
+      "id": "spec-markdown-toc",
+      "dir": "tasks-v3/spec-markdown-toc",
+      "prompt": "Implement generateToc in src/toc.ts exactly per SPEC.md in the repo root (heading extraction, GitHub-style slugs, duplicate suffixes, depth filtering, code-fence exclusion). Tests in src/toc.test.ts. Do not edit the test file or the spec.",
+      "difficulty": "medium",
+      "category": "spec"
+    },
+    {
+      "id": "spec-filter-dsl",
+      "dir": "tasks-v3/spec-filter-dsl",
+      "prompt": "Implement the record-filter DSL described in SPEC.md (field comparisons, and/or/not, parentheses, string/number/bool literals, error cases) in src/filter.ts. Tests in src/filter.test.ts. Do not edit the test file or the spec.",
+      "difficulty": "hard",
+      "category": "spec"
+    },
+    {
+      "id": "spec-workflow-machine",
+      "dir": "tasks-v3/spec-workflow-machine",
+      "prompt": "Implement the workflow state machine defined by the transition tables in SPEC.md (states, guarded transitions, entry actions, illegal-transition errors, history) in src/workflow.ts. Tests in src/workflow.test.ts. Do not edit the test file or the spec.",
+      "difficulty": "hard",
+      "category": "spec"
+    }
+  ]
+}

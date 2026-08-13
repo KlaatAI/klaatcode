@@ -43,7 +43,7 @@ klaatcode
 
 ## What is Klaatu?
 
-**Klaatu** is the routing brain — a hosted service, not something that runs on your machine. Every message you send from Klaat Code goes to Klaatu, which classifies it and routes it through one of five cost tiers (`nano → fast → code → reason → heavy`), escalating automatically when a task turns out harder than it looked, and never charging you frontier prices for a trivial turn. Tool calls inside a single request — reads, edits, shell commands, searches — are free; only your messages count against quota. This is also the architectural reason Klaat Code can be open source without giving away the thing that makes it good: **the client is a thin terminal to a service**, the same relationship `gh` has to GitHub. The intelligence — routing decisions, model health tracking, pricing, the code-graph index — lives server-side, at [klaatai.com](https://klaatai.com).
+**Klaatu** is the routing brain — a hosted service, not something that runs on your machine. Every message you send from Klaat Code goes to Klaatu, which classifies it and routes it through one of six cost tiers (`nano → fast → code → reason → heavy → titan`), escalating automatically when a task turns out harder than it looked, and never charging you frontier prices for a trivial turn. Tool calls inside a single request — reads, edits, shell commands, searches — are free; only your messages count against quota. This is also the architectural reason Klaat Code can be open source without giving away the thing that makes it good: **the client is a thin terminal to a service**, the same relationship `gh` has to GitHub. The intelligence — routing decisions, model health tracking, pricing, the code-graph index — lives server-side, at [klaatai.com](https://klaatai.com).
 
 ## What is Klaat Code, and how is it different?
 
@@ -147,7 +147,7 @@ klaatcode whoami                    # check auth
 
 ### Smart Model Routing
 
-Each request is classified and routed to one of five tiers by Klaatu. You see which tier answered (badge in the header) and why.
+Each request is classified and routed to one of five auto-routed tiers by Klaatu (a sixth, `titan`, is opt-in only). You see which tier answered (badge in the header) and why.
 
 ```
 /tier           # lock a tier, or open the picker
@@ -164,8 +164,9 @@ Each request is classified and routed to one of five tiers by Klaatu. You see wh
 | `code` | Default — most coding work |
 | `reason` | Debugging, architecture, tricky logic |
 | `heavy` | Large refactors, hardest problems |
+| `titan` | Kimi K3 (2.5T) — frontier power. Ask for it with `/tier titan`, or let the router escalate into it from `heavy`; it is never inferred from a prompt's wording. Pro and above, capped per day (Starter only during a promo window). |
 
-The router escalates automatically when a task turns out harder than it looked and de-escalates when you don't need the big guns. Tool rounds, retries, and failovers are never billed — one user message = one request.
+The router escalates automatically when a task turns out harder than it looked and de-escalates when you don't need the big guns. The ladder is `nano → fast → code → reason → heavy → titan`: `titan` is the top rung, reachable by asking for it by name and as the one step above `heavy` when a turn keeps failing or outgrows the context. It de-escalates back to `heavy` when your daily cap is spent. Tool rounds, retries, and failovers are never billed — one user message = one request.
 
 **Bring your own model.** Don't want Klaatu for a task? Add any OpenAI-compatible endpoint and switch to it per-session:
 ```
@@ -457,6 +458,7 @@ klaatcode serve --port 4200
 | `attentionOrder` | `on` / `off` | Arrange old history so the most relevant turns sit where models attend |
 | `maxSessionCost` | USD number | Hard session cost cap — pauses agent rounds when reached |
 | `phaseBudgets` | `on` / `off` | Per-phase token budgets; pause a stuck explore phase before it burns the budget |
+| `telemetry` | `on` / `off` | Install-level reporting (see [Staying up to date](#staying-up-to-date)) |
 
 Full reference, incl. every config key: [klaatai.com/docs/configuration](https://klaatai.com/docs/configuration).
 
@@ -482,6 +484,54 @@ Full reference, incl. every config key: [klaatai.com/docs/configuration](https:/
   skills/             # project prompt skills
   tools/              # project tool plugins (.js)
 ```
+
+## Staying Up To Date
+
+`klaatcode` checks for a newer release when it starts (cached 4h, fail-silent — offline never blocks a launch) and asks before doing anything:
+
+```
+Update available: v2.4.2 → v2.4.3
+Update now? [Y/n]
+```
+
+Say yes and it upgrades through whichever channel installed it (npm, Homebrew, the install script, or the PowerShell installer), verifies the new binary actually reports the new version, and relaunches with your original arguments. Say no and it won't ask again for that release. If the upgrade command fails or the version doesn't change — usually a half-broken global install, or an old `klaatcode-ai` 1.x binary still winning on `PATH` — it falls back to a clean uninstall + reinstall, then tells you exactly what to run if even that fails. It never leaves you without a working CLI.
+
+```bash
+klaatcode upgrade          # upgrade now
+klaatcode upgrade --check  # just report what's available
+klaatcode --no-update-check   # skip the check for this run
+```
+
+Opt out permanently with `KLAATAI_NO_UPDATE=1`. The check is skipped automatically in CI and any non-interactive shell — those print one line to stderr instead of prompting.
+
+Very old builds can be refused by the server (HTTP 426) after a breaking protocol change, with the upgrade command in the response. That floor is off unless a release note says otherwise; `KLAATAI_SKIP_VERSION_GATE=1` bypasses the client-side check at your own risk.
+
+### What the CLI reports about itself
+
+Every request carries four headers so we can tell how many installs are live and which builds are still out there:
+
+| Header | Example | Why |
+|---|---|---|
+| `X-KlaatAI-Client-Version` | `2.4.3` | Version adoption; enforcing the minimum supported build |
+| `X-KlaatAI-Platform` | `darwin-arm64` | Which platforms need testing/builds |
+| `X-KlaatAI-Install-Channel` | `npm` | Which install channel to fix when upgrades fail |
+| `X-KlaatAI-Install-Id` | random UUID | Counting installs — one chatty user is not a thousand installs |
+
+The install id is a **random** UUID generated once and stored in `~/.klaatai/install-id`. It is not derived from your machine — no hostname, no MAC address, no hardware hash — and it identifies an install, not a person or a device. Nothing about your project is ever included: no paths, no repo names, no file names, no prompt or code content. Coarse country/city is derived server-side from the connecting IP, the same as any web request.
+
+Opt out and no install id is sent at all, so no per-install record exists:
+
+```bash
+export KLAATAI_TELEMETRY=0     # or DO_NOT_TRACK=1
+```
+
+or in `~/.klaatai/config.json`:
+
+```json
+{ "telemetry": "off" }
+```
+
+Version and platform still travel when you opt out — the server needs them to refuse unsupported builds and route around version-specific bugs.
 
 ## How Authentication Works
 

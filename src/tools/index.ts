@@ -21,8 +21,9 @@ import {
 } from "node:fs";
 import { join, resolve, dirname, relative } from "node:path";
 import { homedir } from "node:os";
-import { execSync, spawnSync } from "node:child_process";
+import { execSync, spawn, type ChildProcess } from "node:child_process";
 import { type ToolCall, type ToolDefinition, type KlaatAIClient } from "../api/client.js";
+import { VALID_TIERS, EXPLICIT_ONLY_TIERS } from "../screens/tiers.js";
 import { replaceInContent, type ReplaceResult } from "./edit-engine.js";
 import { recordFileRead, checkMutationAllowed } from "./file-state.js";
 import { runDiagnostics } from "./diagnostics.js";
@@ -141,6 +142,30 @@ function checkWriteAllowed(absPath: string): string | null {
   );
 }
 
+/**
+ * "File not found" that also shows what IS there: lists the nearest existing
+ * ancestor directory so the model corrects its path next round instead of
+ * guessing variations (observed doom-loop: models invent conventional paths
+ * like src/app/dashboard/page.tsx and retry blindly on miss).
+ */
+function fileNotFound(relPath: string, absPath: string, projectRoot: string): string {
+  let dir = dirname(absPath);
+  while (dir.startsWith(projectRoot) && !existsSync(dir)) dir = dirname(dir);
+  if (!dir.startsWith(projectRoot)) dir = projectRoot;
+  try {
+    const entries = readdirSync(dir, { withFileTypes: true })
+      .filter(e => !e.name.startsWith("."))
+      .slice(0, 25)
+      .map(e => (e.isDirectory() ? e.name + "/" : e.name));
+    const relDir = relative(projectRoot, dir) || ".";
+    return `Error: File not found: ${relPath}\n` +
+      `Nearest existing directory "${relDir}/" contains: ${entries.join("  ") || "(empty)"}\n` +
+      `Do not guess another path — pick from this listing, or locate the file with glob/grep/list_dir first.`;
+  } catch {
+    return `Error: File not found: ${relPath}`;
+  }
+}
+
 // ─── Tool: read_file ─────────────────────────────────────────────────────────
 
 interface ReadFileArgs {
@@ -151,7 +176,7 @@ interface ReadFileArgs {
 
 function readFile(args: ReadFileArgs, projectRoot: string): string {
   const absPath = safeResolve(projectRoot, args.path);
-  if (!existsSync(absPath)) return `Error: File not found: ${args.path}`;
+  if (!existsSync(absPath)) return fileNotFound(args.path, absPath, projectRoot);
 
   let stat: ReturnType<typeof statSync>;
   try { stat = statSync(absPath); } catch (e) {
@@ -257,7 +282,7 @@ function describeEditFailure(result: Extract<ReplaceResult, { ok: false }>, path
 
 function editFile(args: EditFileArgs, projectRoot: string): string {
   const absPath = safeResolve(projectRoot, args.path);
-  if (!existsSync(absPath)) return `Error: File not found: ${args.path}`;
+  if (!existsSync(absPath)) return fileNotFound(args.path, absPath, projectRoot);
   const sb = checkWriteAllowed(absPath);
   if (sb) return sb;
   const freshness = checkMutationAllowed(absPath, true);
@@ -289,7 +314,7 @@ interface MultiEditArgs {
 /** Apply several edits to one file atomically — all succeed or none are written. */
 function multiEdit(args: MultiEditArgs, projectRoot: string): string {
   const absPath = safeResolve(projectRoot, args.path);
-  if (!existsSync(absPath)) return `Error: File not found: ${args.path}`;
+  if (!existsSync(absPath)) return fileNotFound(args.path, absPath, projectRoot);
   if (!Array.isArray(args.edits) || args.edits.length === 0) {
     return "Error: multi_edit requires a non-empty 'edits' array.";
   }
@@ -301,18 +326,36 @@ function multiEdit(args: MultiEditArgs, projectRoot: string): string {
   try {
     let content = readFileSync(absPath, "utf-8");
     let total = 0;
+    let applied = 0;
+    const skipped: number[] = [];
     for (let i = 0; i < args.edits.length; i++) {
       const e = args.edits[i]!;
       const result = replaceInContent(content, e.old_string, e.new_string, e.replace_all ?? false);
       if (!result.ok) {
+        // An "identical" sub-edit is a model redundancy, not a conflict — the
+        // file already reads exactly as intended there. Failing the whole
+        // batch for it threw away every good edit alongside it (seen live
+        // 2026-08-08: edit 1/12 identical killed 11 valid edits and the turn
+        // stalled). Skip it and keep going; real mismatches still abort.
+        if (result.reason === "identical") {
+          skipped.push(i + 1);
+          continue;
+        }
         return `Error: edit ${i + 1}/${args.edits.length} failed — ${describeEditFailure(result, args.path).replace(/^Error: /, "")} No changes were written.`;
       }
       content = result.content;
       total += result.occurrences;
+      applied++;
+    }
+    if (applied === 0) {
+      return `OK: No changes needed — all ${args.edits.length} edit${args.edits.length === 1 ? "" : "s"} were no-ops (old_string and new_string identical). The file already matches the intended state.`;
     }
     writeFileSync(absPath, content, "utf-8");
     recordFileRead(absPath);
-    return `OK: Applied ${args.edits.length} edits (${total} replacement${total === 1 ? "" : "s"}) in ${relative(projectRoot, absPath)}` +
+    const skippedNote = skipped.length
+      ? ` (${skipped.length} no-op edit${skipped.length === 1 ? "" : "s"} skipped: old_string equalled new_string)`
+      : "";
+    return `OK: Applied ${applied} edit${applied === 1 ? "" : "s"} (${total} replacement${total === 1 ? "" : "s"}) in ${relative(projectRoot, absPath)}${skippedNote}` +
       (runDiagnostics(absPath, projectRoot) ?? "") +
       impactNoteForEdit(absPath, projectRoot, args.edits.map(e => e.new_string).join("\n"));
   } catch (e) {
@@ -439,25 +482,94 @@ interface GrepArgs {
   include?: string; // e.g. "*.ts"
 }
 
-function grepFiles(args: GrepArgs, projectRoot: string): string {
+// ─── Async subprocess runner ─────────────────────────────────────────────────
+// spawnSync blocks the whole event loop — a long build or grep froze the TUI
+// (no spinner, no renders, no Esc) until it finished. Everything foreground
+// runs through here instead: async, output-capped, and registered so an Esc
+// interrupt can kill it immediately.
+
+const MAX_PROC_OUTPUT = 10_000_000; // 10MB hard cap, then the process is killed
+
+const activeProcs = new Set<ChildProcess>();
+
+/**
+ * Kill a spawned command AND its children. Foreground commands run detached
+ * (own process group) so `kill(-pid)` reaches grandchildren — killing only
+ * `sh` leaves e.g. `sleep`/`node` orphans holding the stdio pipes open, which
+ * stalls the close event (and the tool round) until they exit on their own.
+ */
+function killTree(p: ChildProcess, signal: NodeJS.Signals): void {
+  try {
+    if (p.pid) process.kill(-p.pid, signal);
+    else p.kill(signal);
+  } catch {
+    try { p.kill(signal); } catch { /* already gone */ }
+  }
+}
+
+/** Kill all foreground tool subprocesses — wired to the REPL's Esc interrupt. */
+export function killActiveToolProcesses(): void {
+  for (const p of activeProcs) killTree(p, "SIGTERM");
+}
+
+interface ProcResult { stdout: string; stderr: string; code: number | null; killed: boolean }
+
+function runProc(exe: string, argv: string[], cwd: string, timeoutMs: number): Promise<ProcResult> {
+  return new Promise((resolveProc) => {
+    let child: ChildProcess;
+    try {
+      // detached → own process group, so killTree can reach grandchildren.
+      child = spawn(exe, argv, { cwd, detached: process.platform !== "win32" });
+    } catch (e) {
+      resolveProc({ stdout: "", stderr: e instanceof Error ? e.message : String(e), code: -1, killed: false });
+      return;
+    }
+    activeProcs.add(child);
+    let stdout = "", stderr = "", killed = false, settled = false;
+    const timer = setTimeout(() => {
+      killed = true;
+      killTree(child, "SIGTERM");
+      setTimeout(() => killTree(child, "SIGKILL"), 2_000).unref?.();
+    }, timeoutMs);
+    const cap = (cur: string, d: unknown): string => {
+      const next = cur + String(d);
+      if (next.length > MAX_PROC_OUTPUT) { killed = true; killTree(child, "SIGTERM"); }
+      return next.slice(0, MAX_PROC_OUTPUT);
+    };
+    child.stdout?.on("data", d => { stdout = cap(stdout, d); });
+    child.stderr?.on("data", d => { stderr = cap(stderr, d); });
+    const settle = (r: ProcResult) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      activeProcs.delete(child);
+      resolveProc(r);
+    };
+    child.on("close", (code, signal) => settle({ stdout, stderr, code, killed: killed || signal !== null }));
+    child.on("error", (err) => settle({ stdout, stderr: stderr || String(err), code: -1, killed }));
+  });
+}
+
+async function grepFiles(args: GrepArgs, projectRoot: string): Promise<string> {
   const searchDir = args.path ? safeResolve(projectRoot, args.path) : projectRoot;
   if (!existsSync(searchDir)) return `Error: Directory not found: ${args.path ?? "."}`;
 
   try {
     const parts: string[] = [
       "grep", "-r", "-n", "--color=never",
+      "--exclude-dir=node_modules", "--exclude-dir=.git", "--exclude-dir=dist",
+      "--exclude-dir=build", "--exclude-dir=.next", "--exclude-dir=target",
+      "--exclude=*.tsbuildinfo", "--exclude=*.lock", "--exclude=*.min.js",
+      "--exclude=*.map", "--exclude=bun.lock", "--exclude=package-lock.json",
       `--include=${args.include ?? "*"}`,
       "--",
       args.pattern,
       searchDir,
     ];
 
-    const result = spawnSync(parts[0]!, parts.slice(1), {
-      encoding: "utf-8",
-      timeout: 15_000,
-    });
+    const result = await runProc(parts[0]!, parts.slice(1), projectRoot, 15_000);
 
-    const output = (result.stdout ?? "").trim();
+    const output = result.stdout.trim();
     if (!output) return "No matches found.";
 
     // Trim to MAX_GREP_LINES and relativize paths
@@ -509,7 +621,7 @@ interface RunCommandArgs {
   background?: boolean;
 }
 
-function runCommand(args: RunCommandArgs, projectRoot: string): string {
+async function runCommand(args: RunCommandArgs, projectRoot: string): Promise<string> {
   const cwd = args.workdir ? safeResolve(projectRoot, args.workdir) : projectRoot;
   const timeoutMs = (args.timeout ?? 30) * 1_000;
 
@@ -522,22 +634,20 @@ function runCommand(args: RunCommandArgs, projectRoot: string): string {
   }
 
   try {
-    const result = spawnSync("sh", ["-c", args.command], {
-      cwd,
-      encoding: "utf-8",
-      timeout: timeoutMs,
-    });
+    const result = await runProc("sh", ["-c", args.command], cwd, timeoutMs);
 
-    const stdout = (result.stdout ?? "").trim();
-    const stderr = (result.stderr ?? "").trim();
-    const exitCode = result.status ?? 0;
+    const stdout = result.stdout.trim();
+    const stderr = result.stderr.trim();
+    const exitCode = result.code ?? 0;
 
     let out = "";
     if (stdout) out += stdout;
     if (stderr) out += (out ? "\n[stderr]\n" : "[stderr]\n") + stderr;
     if (!out) out = "(no output)";
 
-    const header = exitCode !== 0 ? `[exit ${exitCode}]\n` : "";
+    const header = result.killed
+      ? `[killed — timeout ${Math.round(timeoutMs / 1000)}s reached, interrupted, or output cap hit]\n`
+      : exitCode !== 0 ? `[exit ${exitCode}]\n` : "";
     // 9.1: strip progress/duplicate/passing-test noise BEFORE the oversize
     // check — filtered output often fits where raw would spill to disk.
     return persistOversized(header + filterCommandOutput(out), "command");
@@ -975,6 +1085,11 @@ export async function executeTools(tc: ToolCall, projectRoot: string, client?: K
 
 // ─── Tool Definitions (sent to model) ────────────────────────────────────────
 
+/** Tiers delegate_task may request, in ladder order — every valid tier except
+ * the explicit-only ones (see EXPLICIT_ONLY_TIERS). Derived so a new tier lands
+ * in the schema automatically, and byte-stable across turns (prompt cache). */
+const DELEGATABLE_TIERS: string[] = [...VALID_TIERS].filter(t => !EXPLICIT_ONLY_TIERS.has(t));
+
 export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     type: "function",
@@ -1393,7 +1508,10 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           },
           tier: {
             type: "string",
-            enum: ["nano", "fast", "code", "reason", "heavy"],
+            // Explicit-only tiers (titan) are deliberately absent: a sub-agent
+            // tier the model picks is not the user asking for titan by name,
+            // and one delegated turn can eat a whole day's titan cap.
+            enum: DELEGATABLE_TIERS,
             description: "Optional routing-tier override (each persona has a sensible default).",
           },
           background: {

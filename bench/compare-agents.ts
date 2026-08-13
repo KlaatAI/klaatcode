@@ -359,7 +359,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const suite = JSON.parse(await readFile(resolve(HERE, "suite.json"), "utf-8")) as Suite;
+  const suite = JSON.parse(await readFile(resolve(HERE, process.env.BENCH_SUITE ?? "suite.json"), "utf-8")) as Suite;
   const only = arg("only");
   const from = arg("from");
   const category = arg("category");

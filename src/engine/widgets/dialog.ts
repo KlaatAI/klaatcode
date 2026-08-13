@@ -21,7 +21,7 @@
  */
 
 import { type CellBuffer, type Style } from "../buffer.js";
-import { type KeyEvent } from "../input.js";
+import { type KeyEvent, type MouseEvent } from "../input.js";
 import { type Rect, center } from "../layout.js";
 import { drawBorder, inner } from "./border.js";
 import { drawTextLine } from "./text.js";
@@ -85,6 +85,8 @@ export interface DialogOpts {
   width?:      number;
   maxHeight?:  number;
   borderFg?:   string;
+  /** Value focused when the list opens. */
+  initialValue?: string;
 }
 
 type DialogState =
@@ -101,6 +103,11 @@ type DialogState =
 export class DialogManager {
   private _state: DialogState = { type: "none" };
   private _onRender: (() => void) | null = null;
+  private _listLayout: {
+    rows: Array<{ y: number; index: number }>;
+    back: Rect | null;
+    dialog: Rect;
+  } | null = null;
 
   /** Set a callback to request re-render when dialog state changes. */
   setRenderCallback(cb: () => void): void {
@@ -124,12 +131,15 @@ export class DialogManager {
     onCancel?: () => void,
     opts: Partial<DialogOpts> = {},
   ): void {
+    const initialIndex = opts.initialValue
+      ? items.findIndex(item => item.value === opts.initialValue)
+      : -1;
     this._state = {
       type: "list",
       opts: { title, ...opts },
       items,
       filtered: [...items],
-      selected: 0,
+      selected: Math.max(0, initialIndex),
       search: "",
       onSelect,
       onCancel,
@@ -174,6 +184,7 @@ export class DialogManager {
 
   dismiss(): void {
     this._state = { type: "none" };
+    this._listLayout = null;
     this._onRender?.();
   }
 
@@ -188,6 +199,43 @@ export class DialogManager {
     if (s.type === "input") return this._handleInputKey(s, ev);
 
     return false;
+  }
+
+  /** Handle list hover/click interactions. Returns true when consumed. */
+  handleMouse(ev: MouseEvent): boolean {
+    const s = this._state;
+    const layout = this._listLayout;
+    if (s.type !== "list" || !layout) return false;
+
+    const inside =
+      ev.x >= layout.dialog.x && ev.x < layout.dialog.x + layout.dialog.width &&
+      ev.y >= layout.dialog.y && ev.y < layout.dialog.y + layout.dialog.height;
+    if (!inside) return true; // modal: swallow clicks behind the dialog
+
+    if (layout.back &&
+        ev.x >= layout.back.x && ev.x < layout.back.x + layout.back.width &&
+        ev.y === layout.back.y) {
+      if (ev.action === "press" && ev.button === 0) {
+        s.onCancel?.();
+        this.dismiss();
+      }
+      return true;
+    }
+
+    const row = layout.rows.find(r => r.y === ev.y);
+    if (!row) return true;
+    if (s.selected !== row.index) {
+      s.selected = row.index;
+      this._onRender?.();
+    }
+    if (ev.action === "press" && ev.button === 0) {
+      const item = s.filtered[row.index];
+      if (item) {
+        this.dismiss();
+        s.onSelect(item);
+      }
+    }
+    return true;
   }
 
   private _handleListKey(s: Extract<DialogState, { type: "list" }>, ev: KeyEvent): boolean {
@@ -309,8 +357,8 @@ export class DialogManager {
   ): void {
     const { opts, filtered, selected, search } = s;
     const dialogW = Math.min(opts.width ?? 50, area.width - 4);
-    const maxH    = opts.maxHeight ?? Math.min(filtered.length + 4, area.height - 4);
-    const dialogH = Math.max(6, maxH);
+    const maxH    = opts.maxHeight ?? Math.min(filtered.length + 5, area.height - 4);
+    const dialogH = Math.max(7, maxH);
     const dialogR = center(area, dialogW, dialogH);
 
     // Dim the background
@@ -338,13 +386,20 @@ export class DialogManager {
 
     // Items
     const listStart = contentR.y + 2;
-    const listH     = contentR.height - 2;
+    const listH     = contentR.height - 3;
     const scrollOff = Math.max(0, selected - listH + 2);
+    const visibleRows: Array<{ y: number; index: number }> = [];
+    const labelColW = Math.min(
+      Math.max(0, contentR.width - 12),
+      Math.max(0, ...filtered.map(item => stringWidth(item.label))),
+    );
 
     for (let i = 0; i < listH && i + scrollOff < filtered.length; i++) {
-      const item = filtered[i + scrollOff]!;
-      const isSel = (i + scrollOff) === selected;
+      const index = i + scrollOff;
+      const item = filtered[index]!;
+      const isSel = index === selected;
       const row   = listStart + i;
+      visibleRows.push({ y: row, index });
 
       if (isSel) {
         buf.fill(row, contentR.x, 1, contentR.width, " ", { bg: "#333" });
@@ -358,15 +413,41 @@ export class DialogManager {
       };
 
       buf.write(row, contentR.x, prefix, labelStyle);
-      buf.write(row, contentR.x + 2, item.label, labelStyle);
+      const labelMax = Math.max(0, labelColW);
+      const label = stringWidth(item.label) > labelMax
+        ? item.label.slice(0, Math.max(0, labelMax - 1)) + "…"
+        : item.label;
+      buf.write(row, contentR.x + 2, label, labelStyle);
 
       if (item.description) {
-        const descCol = contentR.x + 2 + stringWidth(item.label) + 2;
-        buf.write(row, descCol, item.description, {
+        const descCol = contentR.x + 2 + labelColW + 2;
+        const descW = Math.max(0, contentR.x + contentR.width - descCol);
+        const description = stringWidth(item.description) > descW
+          ? item.description.slice(0, Math.max(0, descW - 1)) + "…"
+          : item.description;
+        buf.write(row, descCol, description, {
           fg: "gray", dim: true, bg: isSel ? "#333" : undefined,
         });
       }
     }
+
+    const footerY = contentR.y + contentR.height - 1;
+    const footer = "↑↓ navigate  ·  Enter select";
+    drawTextLine(buf, contentR, footerY, footer, { fg: "gray", dim: true });
+    const backLabel = "← Back  Esc";
+    const backX = contentR.x + Math.max(0, contentR.width - stringWidth(backLabel));
+    drawTextLine(
+      buf,
+      { x: backX, y: footerY, width: stringWidth(backLabel), height: 1 },
+      footerY,
+      backLabel,
+      { fg: opts.borderFg ?? "#d8b4fe", bold: true },
+    );
+    this._listLayout = {
+      rows: visibleRows,
+      back: { x: backX, y: footerY, width: stringWidth(backLabel), height: 1 },
+      dialog: dialogR,
+    };
   }
 
   private _renderConfirm(

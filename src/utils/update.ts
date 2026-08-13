@@ -3,6 +3,11 @@
  * latest GitHub release, i.e. the version every install channel serves) and
  * compares against the running version.
  *
+ * The endpoint also serves `minSupported`: the version floor below which this
+ * CLI is no longer allowed to run (breaking protocol/auth change). Below the
+ * floor the startup gate makes the update MANDATORY instead of asking —
+ * see src/commands/update-gate.ts.
+ *
  * Fail-silent by design: no network, bad JSON, or slow endpoint must never
  * affect the CLI. Result cached in ~/.klaatai/update-check.json so we hit
  * the endpoint at most once per CHECK_INTERVAL.
@@ -22,11 +27,21 @@ export interface UpdateInfo {
   current: string;
   latest: string;
   updateAvailable: boolean;
+  /** Version floor from the server; running below it is unsupported. */
+  minSupported?: string;
+  /** true ⇒ current < minSupported: update is not optional. */
+  mandatory: boolean;
+  /** Optional release note the server wants shown with the prompt. */
+  notes?: string;
 }
 
 interface CacheShape {
   checkedAt: number;
   latest: string;
+  minSupported?: string;
+  notes?: string;
+  /** Latest version the user answered "no" to — don't re-prompt for it. */
+  dismissed?: string;
 }
 
 /** -1 if a<b, 0 if equal, 1 if a>b. Prerelease tags compared lexically after the triple. */
@@ -55,25 +70,63 @@ function readCache(): CacheShape | null {
   return null;
 }
 
-function writeCache(latest: string): void {
+function writeCache(patch: Partial<CacheShape>): void {
   try {
     mkdirSync(join(homedir(), ".klaatai"), { recursive: true });
-    writeFileSync(CACHE_FILE, JSON.stringify({ checkedAt: Date.now(), latest } satisfies CacheShape));
+    const prev = readCache();
+    writeFileSync(CACHE_FILE, JSON.stringify({ ...(prev ?? {}), ...patch }));
   } catch { /* fail-silent */ }
 }
 
-async function fetchLatest(): Promise<string | null> {
+/** Extract the first semver-looking token from arbitrary text (e.g. `--version` output). */
+export function parseVersionOutput(text: string): string | null {
+  const m = /(\d+\.\d+\.\d+(?:-[\w.]+)?)/.exec(text);
+  return m ? m[1]! : null;
+}
+
+interface LatestPayload {
+  version: string;
+  minSupported?: string;
+  notes?: string;
+}
+
+async function fetchLatest(): Promise<LatestPayload | null> {
   try {
     const res = await fetch(LATEST_URL, {
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
       headers: { "User-Agent": `klaatcode/${VERSION}` },
     });
     if (!res.ok) return null;
-    const body = (await res.json()) as { version?: string };
-    return typeof body.version === "string" && body.version ? body.version : null;
+    const body = (await res.json()) as { version?: string; minSupported?: string; notes?: string };
+    if (typeof body.version !== "string" || !body.version) return null;
+    return {
+      version: body.version,
+      minSupported: typeof body.minSupported === "string" ? body.minSupported : undefined,
+      notes: typeof body.notes === "string" && body.notes ? body.notes : undefined,
+    };
   } catch {
     return null;
   }
+}
+
+/** Build UpdateInfo from a version pair — pure, so the gate logic is testable. */
+export function buildUpdateInfo(
+  current: string,
+  latest: string,
+  minSupported?: string,
+  notes?: string,
+): UpdateInfo {
+  return {
+    current,
+    latest,
+    updateAvailable: compareSemver(current, latest) < 0,
+    minSupported,
+    // A floor newer than the latest release would strand everyone — ignore it.
+    mandatory: !!minSupported
+      && compareSemver(current, minSupported) < 0
+      && compareSemver(minSupported, latest) <= 0,
+    notes,
+  };
 }
 
 /**
@@ -81,21 +134,41 @@ async function fetchLatest(): Promise<string | null> {
  * Returns null when the check could not be performed (offline etc.).
  */
 export async function checkForUpdate(force = false): Promise<UpdateInfo | null> {
-  let latest: string | null = null;
+  let payload: LatestPayload | null = null;
 
   if (!force) {
     const cache = readCache();
-    if (cache && Date.now() - cache.checkedAt < CHECK_INTERVAL_MS) latest = cache.latest;
+    if (cache && Date.now() - cache.checkedAt < CHECK_INTERVAL_MS) {
+      payload = { version: cache.latest, minSupported: cache.minSupported, notes: cache.notes };
+    }
   }
-  if (!latest) {
-    latest = await fetchLatest();
-    if (latest) writeCache(latest);
+  if (!payload) {
+    payload = await fetchLatest();
+    if (payload) {
+      writeCache({
+        checkedAt: Date.now(),
+        latest: payload.version,
+        minSupported: payload.minSupported,
+        notes: payload.notes,
+      });
+    }
   }
-  if (!latest) return null;
+  if (!payload) return null;
 
-  return {
-    current: VERSION,
-    latest,
-    updateAvailable: compareSemver(VERSION, latest) < 0,
-  };
+  return buildUpdateInfo(VERSION, payload.version, payload.minSupported, payload.notes);
+}
+
+/** Remember that the user declined this version, so we stop asking every launch. */
+export function dismissUpdate(version: string): void {
+  writeCache({ dismissed: version });
+}
+
+/** Has the user already declined this exact version? */
+export function isUpdateDismissed(version: string): boolean {
+  return readCache()?.dismissed === version;
+}
+
+/** Clear a dismissal (e.g. after a successful upgrade). */
+export function clearDismissal(): void {
+  writeCache({ dismissed: undefined });
 }

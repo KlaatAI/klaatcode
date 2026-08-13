@@ -100,7 +100,7 @@ function drawWelcome(buf: CellBuffer, area: Rect, opts: WelcomeOpts): void {
   buf.write(barY, boxX, "▎", { fg: GREEN, bold: true });
   buf.write(barY, boxX + 2, "More for less.", { fg: GREEN, bold: true });
   buf.write(barY, boxX + 17, "Frontier-grade results at a fraction of the tokens & cost —", { fg: "#d4d4d8" });
-  buf.write(barY + 1, boxX + 2, "nano → fast → code → reason → heavy, chosen per request. Tool calls are free.", { fg: "#d4d4d8" });
+  buf.write(barY + 1, boxX + 2, "nano → fast → code → reason → heavy → titan, per request. Tool calls are free.", { fg: "#d4d4d8" });
 
   // ── Project path ──────────────────────────────────────────────────────
   if (opts.projectPath) {

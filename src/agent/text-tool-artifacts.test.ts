@@ -69,3 +69,47 @@ test("strips <klaatu_creation> wrapper tags but keeps the inner content (web-pro
   expect(out).toContain("src/");
   expect(out).toContain("├── app/");
 });
+
+// ── maskTextToolXmlForDisplay (live-stream variant) ──────────────────────────
+
+import { maskTextToolXmlForDisplay } from "./text-tool-artifacts.js";
+
+test("mask: holds back an in-flight tool_call block from the opener on", () => {
+  const streaming =
+    "Verifying the page now.\n<tool_call>\n<function=run_command>\n<parameter=command>\ncurl -f http://localhost:3000/jungle";
+  const out = maskTextToolXmlForDisplay(streaming);
+  expect(out).not.toContain("<tool_call");
+  expect(out).not.toContain("curl -f");
+  expect(out).toContain("Verifying the page now.");
+});
+
+test("mask: holds back a bare <function= opener without wrapper", () => {
+  const out = maskTextToolXmlForDisplay("On it.\n<function=read_file>\n<parameter=path>a.ts");
+  expect(out).toBe("On it.\n");
+});
+
+test("mask: swallows a trailing partial tag so it never flashes", () => {
+  expect(maskTextToolXmlForDisplay("Done reading. <tool_c")).toBe("Done reading. ");
+  expect(maskTextToolXmlForDisplay("Done reading. <func")).toBe("Done reading. ");
+  expect(maskTextToolXmlForDisplay("Done reading. <")).toBe("Done reading. ");
+});
+
+test("mask: strips a completed block once its closer arrives", () => {
+  const done =
+    "Checking.\n<tool_call>\n<function=run_command>\n<parameter=command>ls</parameter>\n</function>\n</tool_call>\nDone.";
+  const out = maskTextToolXmlForDisplay(done);
+  expect(out).not.toContain("<");
+  expect(out).toContain("Checking.");
+  expect(out).toContain("Done.");
+});
+
+test("mask: leaves ordinary text and html mentions untouched", () => {
+  const input = "Use `<div>` for a container; this function is fine.";
+  expect(maskTextToolXmlForDisplay(input)).toBe(input);
+});
+
+test("mask: a lone '<f' mid-sentence that keeps streaming as normal text is not lost forever", () => {
+  // Once more characters arrive and it's clearly not a holdable tag, it renders.
+  expect(maskTextToolXmlForDisplay("a <b> c")).toBe("a <b> c");
+  expect(maskTextToolXmlForDisplay("5 < 6 and 7 > 6")).toBe("5 < 6 and 7 > 6");
+});

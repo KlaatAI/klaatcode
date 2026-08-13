@@ -30,3 +30,33 @@ export function stripStrayTextToolCallArtifacts(text: string): string {
     .replace(STRAY_TAG_RE, "")
     .replace(CREATION_TAG_RE, "");
 }
+
+// Live-stream variant: the final-message strip above only runs when the turn
+// ends, so a text-protocol tool call streams onto the screen token by token
+// (seen live 2026-08-02 on the fast/vision tier: a raw <tool_call> block was
+// the whole visible "answer"). While streaming, an OPENER may be present with
+// its closer still in flight — hold back everything from the opener on, and
+// also swallow a trailing partial tag ("<tool_c") so it never flashes.
+const STREAM_OPENER_RE = /<(?:tool_call|function(?:=|\s|>)|\/tool_call)/i;
+const PARTIAL_TAIL_RE = /<\/?([a-zA-Z_]{0,9})$/;
+const HOLDABLE_TAGS = ["tool_call", "function", "parameter"];
+// A COMPLETE wrapper pair (same shape as the server's _TOOL_CALL_BLOCK) —
+// removed before the opener check so only genuinely in-flight blocks hold.
+const TOOL_CALL_PAIR_RE = /<tool_call>[\s\S]*?<\/tool_call>/gi;
+
+export function maskTextToolXmlForDisplay(text: string): string {
+  let out = text
+    .replace(TOOL_CALL_PAIR_RE, "")
+    .replace(FULL_BLOCK_RE, "")
+    .replace(CREATION_TAG_RE, "");
+  const opener = STREAM_OPENER_RE.exec(out);
+  if (opener) {
+    out = out.slice(0, opener.index);
+  } else {
+    const tail = PARTIAL_TAIL_RE.exec(out);
+    if (tail && HOLDABLE_TAGS.some(t => t.startsWith(tail[1]!.toLowerCase()))) {
+      out = out.slice(0, tail.index);
+    }
+  }
+  return out.replace(STRAY_TAG_RE, "");
+}

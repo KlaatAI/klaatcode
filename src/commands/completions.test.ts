@@ -59,6 +59,29 @@ describe("completions", () => {
     expect(script).toContain("complete -c klaatcode");
   });
 
+  // The checked-in scripts under completions/ are what packagers ship; the embedded
+  // strings are what `klaatai completions <shell>` prints. They drifted once: the zsh
+  // file's --model tier list still read `(nano fast code reason heavy)` after titan was
+  // added to the generator, so tab-completion denied a tier the CLI accepts.
+  test("the checked-in completions/ scripts match the embedded generator", async () => {
+    const dir = `${import.meta.dir}/../../completions`;
+    for (const shell of COMPLETION_SHELLS) {
+      const onDisk = await Bun.file(`${dir}/klaatai.${shell}`).text();
+      expect(onDisk, `completions/klaatai.${shell} is stale — regenerate it`)
+        .toBe(getCompletionScript(shell));
+    }
+  });
+
+  // zsh is the only shell that enumerates the tier VALUES, so it is the only one that
+  // can go stale when a tier is added. Assert the whole ladder, in order.
+  test("zsh --model offers the full tier ladder including titan", () => {
+    const script = getCompletionScript("zsh");
+    const line = script.split("\n").find(l => l.includes("--model[Force routing tier]"));
+    expect(line, "zsh script has no --model tier completion").toBeDefined();
+    const values = line!.match(/:tier:\(([^)]*)\)/)?.[1]?.split(/\s+/) ?? [];
+    expect(values).toEqual(["nano", "fast", "code", "reason", "heavy", "titan"]);
+  });
+
   test("resolveCompletions rejects unknown shells with a usage error", () => {
     const bad = resolveCompletions("bogus");
     expect(bad.ok).toBe(false);
