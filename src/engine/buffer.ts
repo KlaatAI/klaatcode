@@ -125,6 +125,20 @@ export class CellBuffer {
     if (row < 0 || row >= this._rows || col < 0 || col >= this._cols) return;
     const i = row * this._cols + col;
     const c = this._back[i]!;
+    // Wide glyphs paint atomically: the terminal clobbers BOTH columns when
+    // either is overwritten. Overwriting half of a pair must therefore blank
+    // the partner cell too, or the diff believes the partner is still on
+    // screen and skips it — text stays visibly stuck until that exact cell
+    // happens to change (the "stale fragments after CJK output" corruption).
+    if (c.wide && col > 0) {
+      // c was a placeholder — blank the glyph to its left.
+      const g = this._back[i - 1]!;
+      if (g.char !== EMPTY.char || g.wide) { Object.assign(g, EMPTY); this._dirty[i - 1] = true; }
+    } else if (col + 1 < this._cols && this._back[i + 1]!.wide) {
+      // c was a glyph — blank its placeholder to the right.
+      Object.assign(this._back[i + 1]!, EMPTY);
+      this._dirty[i + 1] = true;
+    }
     c.char      = char;
     c.fg        = style.fg        ?? null;
     c.bg        = style.bg        ?? null;
@@ -155,6 +169,12 @@ export class CellBuffer {
         if (c + 1 < this._cols) {
           const i = row * this._cols + (c + 1);
           const ph = this._back[i]!;
+          // If this cell was itself a glyph, its old placeholder at c+2 is
+          // now orphaned — blank it (same pair-breaking rule as set()).
+          if (!ph.wide && c + 2 < this._cols && this._back[i + 1]!.wide) {
+            Object.assign(this._back[i + 1]!, EMPTY);
+            this._dirty[i + 1] = true;
+          }
           ph.char      = "";
           ph.fg        = style.fg        ?? null;
           ph.bg        = style.bg        ?? null;
@@ -271,6 +291,11 @@ export class CellBuffer {
     let curRow = -1;
     let curCol = -1;
     let prevStyle: Cell | null = null;
+    // Set after printing a width-2 char: the following placeholder cell is
+    // already covered by the glyph. Printing a space there (the old
+    // behaviour) overwrote the glyph's right half, which makes terminals
+    // blank the whole glyph — and desyncs the cursor besides.
+    let skipPlaceholder = false;
 
     for (let r = 0; r < this._rows; r++) {
       for (let c = 0; c < this._cols; c++) {
@@ -278,8 +303,25 @@ export class CellBuffer {
         const back  = this._back[i]!;
         const front = this._front[i]!;
 
-        // Skip unchanged cells
-        if (!this._dirty[i] && cellEq(back, front)) continue;
+        if (skipPlaceholder) {
+          skipPlaceholder = false;
+          if (back.wide) {
+            // Glyph to the left just painted both columns — only bookkeep.
+            Object.assign(front, back);
+            this._dirty[i] = false;
+            continue;
+          }
+        }
+
+        // Skip unchanged cells. Equality alone decides: `dirty` only means
+        // "written this frame", and write() marks cells dirty even when the
+        // value didn't change — the old `!dirty &&` guard made every frame
+        // re-emit every cell the render touched, which during streaming is
+        // most of the screen (bytes → flicker on slow terminals).
+        if (cellEq(back, front)) {
+          this._dirty[i] = false;
+          continue;
+        }
 
         // Position cursor
         const needMove = r !== curRow || c !== curCol;
@@ -299,12 +341,24 @@ export class CellBuffer {
         out += back.wide ? " " : (back.char || " ");
 
         // Advance virtual cursor
-        curCol += back.wide ? 1 : (charWidth(back.char) || 1);
+        const w = back.wide ? 1 : (charWidth(back.char) || 1);
+        curCol += w;
+        if (w === 2) skipPlaceholder = true;
+
+        // The virtual cursor is only trustworthy for printable ASCII — for
+        // anything else the terminal's actual advance can differ from
+        // charWidth() (ambiguous-width symbols, emoji presentation, font
+        // quirks). Trusting it lets the diff skip moveTo() and paint every
+        // later run in the row at an offset — the classic "SesSession"
+        // doubled-prefix corruption. Force a re-position instead.
+        const cp = back.wide ? 0 : (back.char.codePointAt(0) ?? 0);
+        if (cp > 0x7e) curCol = -0x7fffffff;
 
         // Sync front buffer
         Object.assign(front, back);
         this._dirty[i] = false;
       }
+      skipPlaceholder = false;
     }
 
     // Reset style at end of frame
@@ -318,6 +372,19 @@ export class CellBuffer {
       this.cursorTarget = null;
     }
 
-    if (out.length > 0) termWrite(out);
+    // Synchronized update (DEC 2026): the terminal applies the whole frame
+    // atomically instead of repainting mid-write — kills streaming-time
+    // tearing. Ignored by terminals that don't support it.
+    if (out.length > 0) {
+      termWrite(`\x1b[?2026h${out}\x1b[?2026l`);
+    }
+  }
+
+  /** Forget everything the screen is believed to contain — the next flush
+   *  repaints every cell. Recovery path for external corruption (a stray
+   *  dependency console.log, a terminal glitch): wired to Ctrl+L. */
+  invalidate(): void {
+    for (const cell of this._front) Object.assign(cell, EMPTY);
+    this._dirty.fill(true);
   }
 }

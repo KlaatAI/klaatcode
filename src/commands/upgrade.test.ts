@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { join } from "node:path";
 import {
   classifyUpgradeFailure,
   detectInstallChannelFromPath,
@@ -150,7 +151,8 @@ describe("repairPlanFor", () => {
 
   test("installer repair wipes the install dir first", () => {
     const plan = repairPlanFor("installer", "/Users/me")!;
-    expect(plan.removeDirs).toEqual(["/Users/me/.klaatcode"]);
+    // join() so the expectation carries the platform separator, like the code.
+    expect(plan.removeDirs).toEqual([join("/Users/me", ".klaatcode")]);
     expect(plan.commands).toHaveLength(1);
   });
 

@@ -66,9 +66,10 @@ describe("completions", () => {
   test("the checked-in completions/ scripts match the embedded generator", async () => {
     const dir = `${import.meta.dir}/../../completions`;
     for (const shell of COMPLETION_SHELLS) {
-      const onDisk = await Bun.file(`${dir}/klaatai.${shell}`).text();
+      // Normalize CRLF: a Windows checkout with autocrlf must not read as drift.
+      const onDisk = (await Bun.file(`${dir}/klaatai.${shell}`).text()).replace(/\r\n/g, "\n");
       expect(onDisk, `completions/klaatai.${shell} is stale — regenerate it`)
-        .toBe(getCompletionScript(shell));
+        .toBe(getCompletionScript(shell).replace(/\r\n/g, "\n"));
     }
   });
 

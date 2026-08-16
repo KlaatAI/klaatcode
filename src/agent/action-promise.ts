@@ -25,8 +25,13 @@ export const ACTION_PROMISE_RE = new RegExp(
   "\\b(?:" +
     // "I'll fix", "I will now rewrite", "I'm going to delete", "I am rewriting"
     `i(?:['’]ll|['’]m|\\s+will|\\s+am)\\s+(?:not\\s+stop\\b|(?:now\\s+|going\\s+to\\s+|about\\s+to\\s+)?${VERB}\\w*)` +
-    // "let me fix", "let me now rewrite"
-    `|let\\s+me\\s+(?:now\\s+)?${VERB}\\w*` +
+    // "let me fix", "let's read the file", "let us check" (seen live
+    // 2026-08-16: a turn ended dead on "Let's read the file." — "let's" was
+    // not in this pattern). "let me know" stays exempt: "know" is not a VERB.
+    `|(?:let\\s+(?:me|us)|let['’]s)\\s+(?:now\\s+|first\\s+|just\\s+)?${VERB}\\w*` +
+    // "we'll read", "we should probably read", "we need to check" — the
+    // narrated-plan voice reasoning models leak into content.
+    `|(?:we['’]ll|we\\s+(?:will|should|need\\s+to))\\s+(?:now\\s+|first\\s+|just\\s+|probably\\s+)?${VERB}\\w*` +
     "|one\\s+moment" +
     "|starting\\s+fresh\\s+now" +
   ")\\b",

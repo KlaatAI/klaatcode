@@ -17,12 +17,14 @@ export interface PlanStep {
   rationale: string;
   /** Line to center a section read on (mode "section" only). */
   line?: number;
+  /** Community label of the file (G4) — groups the plan by subsystem. */
+  community?: string | null;
 }
 
 export interface GraphAccess {
   /** Symbol search (name/path LIKE) — localDbQuery shape. */
   query(keyword: string, limit: number): Array<{
-    name: string; kind: string; file: string; line: number;
+    name: string; kind: string; file: string; line: number; community?: string | null;
   }>;
   /** 1-hop callers of a symbol — localDbCallers shape. */
   callers(symbolName: string): Array<{ callerName: string; callerFile: string; hop: number }>;
@@ -103,6 +105,7 @@ export function buildPlan(
         file: sym.file,
         mode: "section",
         line: sym.line,
+        community: sym.community ?? null,
         rationale: `defines ${sym.kind} \`${sym.name}\` (matched "${term}")`,
       });
     }
@@ -137,7 +140,8 @@ export function renderPlan(task: string, steps: PlanStep[]): string {
       s.mode === "outline" ? "file_outline" :
       s.mode === "section"  ? `read_file offset≈${Math.max(1, (s.line ?? 1) - 20)} limit≈60` :
       "read_file";
-    lines.push(`${i + 1}. ${s.file} — ${s.mode} (${how}) · ${s.rationale}`);
+    const comm = s.community ? ` [${s.community}]` : "";
+    lines.push(`${i + 1}. ${s.file}${comm} — ${s.mode} (${how}) · ${s.rationale}`);
   });
   lines.push(
     "",

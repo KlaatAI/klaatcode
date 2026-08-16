@@ -232,6 +232,7 @@ export class KlaatAIClient {
   private model: string;
   private _projectId: string | null = null;
   private _sessionId: string;
+  private _requestId: string | null = null;
   private _pendingFeedback: ModelFeedback | null = null;
   private _onAuthExpired: (() => Promise<string | null>) | null;
   private _custom: CustomEndpoint | null = null;
@@ -334,6 +335,22 @@ export class KlaatAIClient {
   get token(): string { return this.apiKey; }
   get serverUrl(): string { return this.baseUrl; }
 
+  /**
+   * Start a new user turn and return its request id.
+   *
+   * Scoped to the USER TURN, not the HTTP request: every tool continuation that
+   * follows reuses this id, so all rounds of one task group together and an
+   * outcome fired later attributes to the task rather than to whichever round
+   * happened to be last.
+   */
+  beginUserTurn(): string {
+    this._requestId = crypto.randomUUID();
+    return this._requestId;
+  }
+
+  /** Request id of the current user turn, if one has begun. */
+  get requestId(): string | null { return this._requestId; }
+
   private headers(extra?: Record<string, string>): Record<string, string> {
     const h: Record<string, string> = {
       "Authorization": `Bearer ${this.apiKey}`,
@@ -345,6 +362,14 @@ export class KlaatAIClient {
       ...clientIdentityHeaders(),
       // Stable session identity (A3 stickiness + C2 checkpoint cache).
       "X-Session-Affinity": this._sessionId,
+      // THE join key. Client-generated and shared by every HTTP request belonging
+      // to one user turn (tool continuations included), so the routing decision,
+      // each dispatch, and any later outcome all land on the same request_id.
+      // The gateway honours this header and echoes it back (server.py:709); without
+      // it the server mints its own and the client never learns it, which makes an
+      // outcome reported minutes later impossible to attribute. Unfixable after the
+      // fact, which is why it is here rather than on the roadmap.
+      ...(this._requestId ? { "X-Request-ID": this._requestId } : {}),
       // We retention-compact the transcript client-side before every request,
       // so ask the server to trust it and skip its own blind truncation
       // (honored once Klaatu C3 lands; harmless otherwise).

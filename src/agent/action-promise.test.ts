@@ -42,3 +42,16 @@ test("exploration promises count too — seen live 2026-08-08", () => {
   // "let me know" stays a legitimate handoff, not a promise
   expect(looksLikeUnfulfilledActionPromise("Let me know when you've deployed it.")).toBe(false);
 });
+
+test("plural narrated-plan voice counts — seen live 2026-08-16", () => {
+  // The turn that ended dead on this exact sentence, tools never called:
+  expect(looksLikeUnfulfilledActionPromise("Let's read the file.")).toBe(true);
+  expect(looksLikeUnfulfilledActionPromise(
+    "We need to explain the TUI implementation. We should probably read the tui.ts file to understand its structure, exports, and usage.\n\nLet's read the file."
+  )).toBe(true);
+  expect(looksLikeUnfulfilledActionPromise("We'll check the auth flow next.")).toBe(true);
+  // Advice about the user's own actions is not a promise
+  expect(looksLikeUnfulfilledActionPromise("You should read the contributing guide.")).toBe(false);
+  // A trailing question still hands off, even in plural voice
+  expect(looksLikeUnfulfilledActionPromise("Let's read the file — or do you want a summary first?")).toBe(false);
+});

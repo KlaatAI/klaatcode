@@ -1,7 +1,7 @@
 {
   "name": "klaatai",
-  "version": "2.4.4",
-  "description": "KlaatAI \u2014 AI coding assistant CLI with smart model routing",
+  "version": "2.5.0",
+  "description": "KlaatAI \u00e2\u20ac\u201d AI coding assistant CLI with smart model routing",
   "license": "MIT",
   "author": "KlaatAI <hello@klaatai.com>",
   "homepage": "https://klaatai.com",
@@ -48,7 +48,9 @@
   },
   "dependencies": {
     "chalk": "^5.3.0",
-    "commander": "^12.1.0"
+    "commander": "^12.1.0",
+    "tree-sitter-wasms": "0.1.13",
+    "web-tree-sitter": "0.25.10"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",

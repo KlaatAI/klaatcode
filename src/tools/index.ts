@@ -19,7 +19,7 @@ import {
   statSync,
   unlinkSync,
 } from "node:fs";
-import { join, resolve, dirname, relative } from "node:path";
+import { join, resolve, dirname, relative, isAbsolute } from "node:path";
 import { homedir } from "node:os";
 import { execSync, spawn, type ChildProcess } from "node:child_process";
 import { type ToolCall, type ToolDefinition, type KlaatAIClient } from "../api/client.js";
@@ -34,16 +34,36 @@ import { filterCommandOutput } from "./output-filter.js";
 import { buildPlan, renderPlan, type GraphAccess } from "./exploration-planner.js";
 import { resolveProjectId } from "../utils/project-id.js";
 import {
-  localDbQuery, localDbFileSymbols, localDbCallers, localDbSemanticSearch,
+  localDbQuery, localDbFileSymbols, localDbCallers, localDbSemanticSearch, localDbGodNodes,
+  localDbDirOutline,
   type LocalSymbol,
 } from "./local-db.js";
 import { embedQuery } from "./code-embedder.js";
 import { browserSession } from "./browser-session.js";
+import { ReadDedupTracker, redundantReadNotice } from "./read-dedup.js";
+import { resolveSymbolSpan, symbolNotFoundNotice, SPAN_MARGIN } from "./symbol-span.js";
+import { noteFileMutated } from "./kg-indexer.js";
+import { shellCommand } from "./shell.js";
+
+/** G3: successful mutations queue their file for an incremental graph reindex. */
+function _noteMutationForGraph(result: unknown, args: Record<string, unknown>, projectRoot: string): void {
+  if (typeof result !== "string" || result.startsWith("Error")) return;
+  const p = args["path"];
+  if (typeof p === "string" && p) noteFileMutated(safeResolve(projectRoot, p));
+}
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const MAX_OUTPUT = 12_000; // characters returned to model
-const DEFAULT_READ_LINES = 200;
+const MAX_OUTPUT = 12_000; // characters returned to model (non-read tools)
+// G1 unified read contract (VS Code parity): 1000 lines / ~96 KB / 2000
+// chars-per-line. Every extra page is a full agent round trip; old reads are
+// trimmed by compaction (client keeps only the latest read per path intact),
+// so a bigger page does not ride in context forever.
+const DEFAULT_READ_LINES = 1000;
+const MAX_READ_CHARS = 96_000;
+// Clamped lines carry an explicit marker — a silently shortened line would
+// feed edit_file an oldString that can never match.
+const MAX_LINE_CHARS = 2_000;
 const MAX_GLOB_RESULTS = 200;
 const MAX_GREP_LINES = 150;
 
@@ -104,6 +124,9 @@ let sandbox: SandboxConfig = { enabled: true, root: process.cwd(), allow: [] };
 /** Paths that must never be written by the agent, even with the sandbox off. */
 const HARD_DENY = [
   "/etc", "/bin", "/sbin", "/usr", "/System", "/Library", "/boot", "/dev", "/proc",
+  ...(process.platform === "win32"
+    ? ["C:\\Windows", "C:\\Program Files", "C:\\Program Files (x86)", "C:\\ProgramData"]
+    : []),
   join(homedir(), ".ssh"),
   join(homedir(), ".aws"),
   join(homedir(), ".config", "gcloud"),
@@ -116,8 +139,13 @@ export function configureSandbox(opts: Partial<SandboxConfig>): void {
 }
 
 function isInside(child: string, parent: string): boolean {
-  const rel = relative(parent, child);
-  return rel === "" || (!rel.startsWith("..") && !resolve(child).includes("../"));
+  const rel = relative(resolve(parent), resolve(child));
+  if (rel === "") return true;
+  // On Windows, relative() across drives returns an ABSOLUTE path (not a
+  // ..-prefixed one), so without the isAbsolute check every path on another
+  // drive counted as "inside" — HARD_DENY "/etc" (→ <cwd-drive>:\etc) then
+  // refused perfectly ordinary writes on other drives.
+  return !rel.startsWith("..") && !isAbsolute(rel);
 }
 
 /**
@@ -172,7 +200,14 @@ interface ReadFileArgs {
   path: string;
   offset?: number; // 1-indexed start line
   limit?: number;  // max lines
+  /** G5: symbol name to read — span resolved from the code graph. */
+  symbol?: string;
 }
+
+// Unchanged-read short-circuit (G1): identical range of an unmutated file
+// re-read within minutes costs a ~20-token notice instead of a page. mtime
+// comparison doubles as invalidation, so no wiring at mutation sites.
+const readDedup = new ReadDedupTracker();
 
 function readFile(args: ReadFileArgs, projectRoot: string): string {
   const absPath = safeResolve(projectRoot, args.path);
@@ -188,17 +223,65 @@ function readFile(args: ReadFileArgs, projectRoot: string): string {
     return listDir({ path: args.path }, projectRoot);
   }
 
+  // G5 graph-aware read: symbol= resolves the exact span via the local graph
+  // — one call instead of file_outline + read_file. Falls through to the
+  // normal offset/limit path, so dedup/caps/footers all still apply.
+  let offset = Math.max(1, args.offset ?? 1);
+  let limit = args.limit ?? DEFAULT_READ_LINES;
+  const symbolQuery = typeof args.symbol === "string" ? args.symbol.trim() : "";
+  if (symbolQuery) {
+    const proj = resolveProjectId(projectRoot);
+    const relPath = relative(projectRoot, absPath);
+    const fileSymbols = proj ? localDbFileSymbols(proj.id, relPath) : [];
+    const span = resolveSymbolSpan(fileSymbols, symbolQuery);
+    if (!span) return symbolNotFoundNotice(relPath, symbolQuery, fileSymbols);
+    offset = Math.max(1, span.start - SPAN_MARGIN);
+    limit = span.end + SPAN_MARGIN - offset + 1;
+  }
+
+  const verdict = readDedup.check(absPath, stat.mtimeMs, offset, limit, Date.now());
+  if (verdict.redundant) {
+    return redundantReadNotice(args.path, offset, verdict);
+  }
+
   try {
     const content = readFileSync(absPath, "utf-8");
     recordFileRead(absPath);
     const lines = content.split("\n");
-    const offset = Math.max(1, args.offset ?? 1);
-    const limit = args.limit ?? DEFAULT_READ_LINES;
     const slice = lines.slice(offset - 1, offset - 1 + limit);
-    const numbered = slice.map((l, i) => `${offset + i}: ${l}`).join("\n");
-    const remaining = lines.length - (offset - 1 + limit);
-    const note = remaining > 0 ? `\n[... ${remaining} more lines — use offset/limit to read further]` : "";
-    return truncate(numbered + note);
+
+    let numbered = "";
+    let consumed = 0;
+    let clampedLines = 0;
+    let capped = false;
+    for (let i = 0; i < slice.length; i++) {
+      const raw = slice[i]!;
+      const clamped = raw.length > MAX_LINE_CHARS
+        ? raw.slice(0, MAX_LINE_CHARS) + ` …[line clamped: ${raw.length} chars total]`
+        : raw;
+      if (clamped !== raw) clampedLines++;
+      const line = `${offset + i}: ${clamped}\n`;
+      // The per-line clamp bounds any single line, so the cap only triggers
+      // after many lines — continuation at offset+consumed always progresses.
+      if (numbered.length + line.length > MAX_READ_CHARS) { capped = true; break; }
+      numbered += line;
+      consumed++;
+    }
+
+    let out = numbered.replace(/\n$/, "");
+    if (capped) {
+      out += `\n(Output capped at ~96 KB after ${consumed} line(s). Use offset=${offset + Math.max(1, consumed)} to continue.)`;
+    } else if (slice.length < lines.length - (offset - 1)) {
+      const lastShown = offset + slice.length - 1;
+      out += `\n(Showing lines ${offset}-${lastShown} of ${lines.length}. Use offset=${lastShown + 1} to continue.)`;
+    }
+    if (clampedLines > 0) {
+      out += `\n(${clampedLines} line(s) exceeded ${MAX_LINE_CHARS} chars and were clamped — markers show original lengths. For minified/one-line files use run_command — e.g. \`jq\` or \`grep\` — to extract the parts you need.)`;
+    }
+
+    const shownEnd = offset + (capped ? Math.max(1, consumed) : slice.length) - 1;
+    readDedup.note(absPath, stat.mtimeMs, offset, limit, shownEnd, lines.length, Date.now());
+    return out;
   } catch (e) {
     return `Error reading file: ${e instanceof Error ? e.message : String(e)}`;
   }
@@ -550,43 +633,92 @@ function runProc(exe: string, argv: string[], cwd: string, timeoutMs: number): P
   });
 }
 
+// In-process grep. The old implementation spawned the external `grep` binary,
+// which does not exist on stock Windows — the spawn failed silently and the
+// tool returned "No matches found." for EVERY query (seen live: the model
+// concluded exported functions didn't exist). Pure JS needs no binary and
+// behaves identically on every platform.
+
+const GREP_EXCLUDE_DIRS = new Set([
+  "node_modules", ".git", "dist", "build", ".next", "out",
+  "target", "vendor", "coverage", ".venv", "__pycache__",
+]);
+const GREP_EXCLUDE_FILES = /(?:\.tsbuildinfo|\.lock|\.min\.js|\.map)$|^(?:bun\.lock|package-lock\.json)$/;
+const GREP_MAX_FILE_BYTES = 1_500_000;
+const GREP_COUNT_CAP = 2_000; // stop counting past this — "2000+ matches" is answer enough
+
+/** `*.ts` / `*.{ts,tsx}` / `foo?.js` → basename regex (case-insensitive on win32). */
+function _includeToRegex(glob: string): RegExp {
+  const body = glob
+    .replace(/[.+^$()|[\]\\]/g, "\\$&")
+    .replace(/\{([^}]*)\}/g, (_m, alts: string) => `(?:${alts.split(",").join("|")})`)
+    .replace(/\*/g, "[^/\\\\]*")
+    .replace(/\?/g, ".");
+  return new RegExp(`^${body}$`, process.platform === "win32" ? "i" : "");
+}
+
 async function grepFiles(args: GrepArgs, projectRoot: string): Promise<string> {
   const searchDir = args.path ? safeResolve(projectRoot, args.path) : projectRoot;
   if (!existsSync(searchDir)) return `Error: Directory not found: ${args.path ?? "."}`;
 
+  // Same ERE dialect grep took; an invalid pattern degrades to a literal
+  // search instead of erroring — the model's intent is "find this text".
+  let rx: RegExp;
+  try { rx = new RegExp(args.pattern); }
+  catch { rx = new RegExp(args.pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")); }
+  const inc = args.include && args.include !== "*" ? _includeToRegex(args.include) : null;
+
+  const out: string[] = [];
+  let total = 0;
+  let scanned = 0;
+  const stack = [searchDir];
+
   try {
-    const parts: string[] = [
-      "grep", "-r", "-n", "--color=never",
-      "--exclude-dir=node_modules", "--exclude-dir=.git", "--exclude-dir=dist",
-      "--exclude-dir=build", "--exclude-dir=.next", "--exclude-dir=target",
-      "--exclude=*.tsbuildinfo", "--exclude=*.lock", "--exclude=*.min.js",
-      "--exclude=*.map", "--exclude=bun.lock", "--exclude=package-lock.json",
-      `--include=${args.include ?? "*"}`,
-      "--",
-      args.pattern,
-      searchDir,
-    ];
+    walk: while (stack.length > 0) {
+      const dir = stack.pop()!;
+      let entries;
+      try { entries = readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+      for (const e of entries) {
+        const base = String(e.name);
+        const full = join(dir, base);
+        if (e.isDirectory()) {
+          if (!GREP_EXCLUDE_DIRS.has(base)) stack.push(full);
+          continue;
+        }
+        if (GREP_EXCLUDE_FILES.test(base)) continue;
+        if (inc && !inc.test(base)) continue;
 
-    const result = await runProc(parts[0]!, parts.slice(1), projectRoot, 15_000);
+        let text: string;
+        try {
+          const buf = readFileSync(full);
+          if (buf.length > GREP_MAX_FILE_BYTES) continue;
+          if (buf.subarray(0, 8192).includes(0)) continue; // binary
+          text = buf.toString("utf-8");
+        } catch { continue; }
 
-    const output = result.stdout.trim();
-    if (!output) return "No matches found.";
+        // Yield to the event loop periodically so the TUI keeps rendering.
+        if ((++scanned & 63) === 0) await new Promise(r => setImmediate(r));
 
-    // Trim to MAX_GREP_LINES and relativize paths
-    const lines = output.split("\n").slice(0, MAX_GREP_LINES);
-    const rel = lines.map(l => {
-      // grep output: /abs/path:line:content → rel/path:line:content
-      const m = l.match(/^(\/[^:]+):(.+)$/);
-      if (m) return `${relative(projectRoot, m[1]!)}:${m[2]}`;
-      return l;
-    });
-
-    const remaining = output.split("\n").length - MAX_GREP_LINES;
-    const note = remaining > 0 ? `\n[... ${remaining} more matches]` : "";
-    return truncate(rel.join("\n") + note);
+        const lines = text.split("\n");
+        for (let i = 0; i < lines.length; i++) {
+          if (!rx.test(lines[i]!)) continue;
+          total++;
+          if (total <= MAX_GREP_LINES) {
+            out.push(`${relative(projectRoot, full)}:${i + 1}:${lines[i]!.slice(0, 400)}`);
+          }
+          if (total >= GREP_COUNT_CAP) break walk;
+        }
+      }
+    }
   } catch (e) {
     return `Error: ${e instanceof Error ? e.message : String(e)}`;
   }
+
+  if (total === 0) return "No matches found.";
+  const note = total > MAX_GREP_LINES
+    ? `\n[... ${total - MAX_GREP_LINES}${total >= GREP_COUNT_CAP ? "+" : ""} more matches]`
+    : "";
+  return truncate(out.join("\n") + note);
 }
 
 // ─── Tool: list_dir ──────────────────────────────────────────────────────────
@@ -606,10 +738,31 @@ function listDir(args: ListDirArgs, projectRoot: string): string {
     // Dirs first, then files, both sorted
     const dirs = entries.filter(e => e.isDirectory()).map(e => `${e.name}/`).sort();
     const files = entries.filter(e => !e.isDirectory()).map(e => e.name).sort();
-    return truncate([...dirs, ...files].join("\n"));
+    return truncate([...dirs, ...files].join("\n") + dirGraphOutline(absPath, projectRoot));
   } catch (e) {
     return `Error: ${e instanceof Error ? e.message : String(e)}`;
   }
+}
+
+/** G5b: append what the local graph knows about a directory's files — top
+ *  symbols and community — so a directory read orients without a follow-up
+ *  file_outline per file. Silent when the graph has nothing. */
+function dirGraphOutline(absDir: string, projectRoot: string): string {
+  try {
+    const proj = resolveProjectId(projectRoot);
+    if (!proj) return "";
+    const rows = localDbDirOutline(proj.id, relative(projectRoot, absDir));
+    if (rows.length === 0) return "";
+    const lines = rows.map((r) => {
+      const syms = r.symbols.map((s) => s.name).join(", ");
+      const base = r.path.split(/[\\/]/).pop() ?? r.path;
+      return `  ${base}${r.community ? ` [${r.community}]` : ""}${syms ? ` — ${syms}` : ""}`;
+    });
+    return (
+      `\n\nGraph outline (top symbols per file; [community]):\n${lines.join("\n")}` +
+      `\nUse read_file with symbol="Name" to jump straight to a definition.`
+    );
+  } catch { return ""; }
 }
 
 // ─── Tool: run_command ───────────────────────────────────────────────────────
@@ -634,7 +787,8 @@ async function runCommand(args: RunCommandArgs, projectRoot: string): Promise<st
   }
 
   try {
-    const result = await runProc("sh", ["-c", args.command], cwd, timeoutMs);
+    const sh = shellCommand(args.command);
+    const result = await runProc(sh.exe, sh.args, cwd, timeoutMs);
 
     const stdout = result.stdout.trim();
     const stderr = result.stderr.trim();
@@ -828,7 +982,10 @@ function todoRead(): string {
 
 function _fmtLocalSymbols(syms: LocalSymbol[]): string {
   return syms.map((s) => {
-    const lines = [`## ${s.name} (${s.kind})`, `File: ${s.file}:${s.line}`];
+    // Community label inline on the File line (G4): tells the model which
+    // subsystem it's in for ~3 tokens, no extra round trip.
+    const comm = s.community ? ` [${s.community}]` : "";
+    const lines = [`## ${s.name} (${s.kind})`, `File: ${s.file}:${s.line}${comm}`];
     if (s.signature) lines.push(`Signature: ${s.signature}`);
     if (s.callers?.length) lines.push(`Called by: ${s.callers.join(", ")}`);
     if (s.callees?.length) lines.push(`Calls: ${s.callees.join(", ")}`);
@@ -1019,13 +1176,22 @@ function planExploration(
   const graph: GraphAccess = {
     query: (kw, limit) =>
       localDbQuery(proj.id, kw, undefined, limit).map(s => ({
-        name: s.name, kind: s.kind, file: s.file, line: s.line,
+        name: s.name, kind: s.kind, file: s.file, line: s.line, community: s.community,
       })),
     callers: (name) => localDbCallers(proj.id, name, 1),
   };
   try {
     const steps = buildPlan(task, graph, args.max_files);
-    return renderPlan(task, steps);
+    let out = renderPlan(task, steps);
+    // G4: god nodes — the symbols whose modification ripples furthest. Worth
+    // ~30 tokens once per plan; prevents a blind edit to a load-bearing name.
+    const gods = localDbGodNodes(proj.id, 5).filter(g => g.refs >= 5);
+    if (steps.length > 0 && gods.length > 0) {
+      out += "\n\nLoad-bearing symbols (most-referenced in this project): " +
+        gods.map(g => `${g.name} (${g.refs} refs, ${g.file})`).join(", ") +
+        ". Run impact_check before modifying any of them.";
+    }
+    return out;
   } catch (e) {
     return `plan_exploration failed: ${e instanceof Error ? e.message : String(e)}`;
   }
@@ -1044,9 +1210,23 @@ export async function executeTools(tc: ToolCall, projectRoot: string, client?: K
 
   switch (tc.function.name) {
     case "read_file":    return readFile(args as unknown as ReadFileArgs, projectRoot);
-    case "write_file":   return writeFile(args as unknown as WriteFileArgs, projectRoot);
-    case "edit_file":    return editFile(args as unknown as EditFileArgs, projectRoot);
-    case "multi_edit":   return multiEdit(args as unknown as MultiEditArgs, projectRoot);
+    case "write_file": {
+      const r = writeFile(args as unknown as WriteFileArgs, projectRoot);
+      _noteMutationForGraph(r, args, projectRoot);
+      return r;
+    }
+    case "edit_file": {
+      const r = editFile(args as unknown as EditFileArgs, projectRoot);
+      _noteMutationForGraph(r, args, projectRoot);
+      return r;
+    }
+    case "multi_edit": {
+      const r = multiEdit(args as unknown as MultiEditArgs, projectRoot);
+      _noteMutationForGraph(r, args, projectRoot);
+      return r;
+    }
+    // apply_patch mutates paths named inside the patch text, not in args — the
+    // session-start full diff picks those up (incremental hook not worth a parser).
     case "apply_patch":  return applyPatch(args as unknown as ApplyPatchArgs, projectRoot);
     case "glob":         return globFiles(args as unknown as GlobArgs, projectRoot);
     case "grep":         return grepFiles(args as unknown as GrepArgs, projectRoot);
@@ -1096,8 +1276,12 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     function: {
       name: "read_file",
       description:
-        "Read a file's contents with line numbers. Use offset+limit for large files. " +
-        "If called on a directory, lists its contents instead.",
+        "Read a file's contents with line numbers. One call returns up to 1000 lines " +
+        "(~96 KB) — a full page for most files, so do NOT page through files with small " +
+        "limits; omit offset/limit unless you need a specific slice you already located. " +
+        "To read one function/class, pass symbol — it resolves the exact span from the " +
+        "code graph in one call (no file_outline needed first). " +
+        "If called on a directory, lists its contents plus a graph outline.",
       parameters: {
         type: "object",
         properties: {
@@ -1111,7 +1295,11 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           },
           limit: {
             type: "integer",
-            description: "Maximum number of lines to return. Default: 200.",
+            description: "Maximum number of lines to return. Default: 1000 (~96 KB cap).",
+          },
+          symbol: {
+            type: "string",
+            description: "Function/class/method name to read (e.g. \"login\" or \"UserService.login\"). Serves exactly that span; overrides offset/limit. If not found, returns the file outline.",
           },
         },
         required: ["path"],

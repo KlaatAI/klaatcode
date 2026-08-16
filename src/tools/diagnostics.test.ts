@@ -187,7 +187,12 @@ describe("config override still wins for new extensions", () => {
     configureDiagnostics({
       enabled: true,
       timeoutMs: 8_000,
-      commands: { ".sh": "echo 'script.sh:1:1: error: fake' >&2; exit 1" },
+      // Override syntax is platform-native (sh vs cmd) — mirror that here.
+      commands: {
+        ".sh": process.platform === "win32"
+          ? "echo script.sh:1:1: error: fake>&2 & exit 1"
+          : "echo 'script.sh:1:1: error: fake' >&2; exit 1",
+      },
     });
     const absPath = join(tmp, "override.sh");
     writeFileSync(absPath, "#!/bin/sh\n");
@@ -201,7 +206,7 @@ describe("config override still wins for new extensions", () => {
     configureDiagnostics({
       enabled: true,
       timeoutMs: 8_000,
-      commands: { ".swift": "true" },
+      commands: { ".swift": "exit 0" }, // valid in both sh and cmd
     });
     const absPath = join(tmp, "clean.swift");
     writeFileSync(absPath, "struct Ok {}\n");

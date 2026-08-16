@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { parseSkillMd, gitRootAbove } from "../agent/skills.js";
 
 export type SkillOrigin = "klaatai" | "claude";
 
@@ -42,15 +43,19 @@ function skillFromFile(
   sourceLabel: string,
 ): Skill | null {
   try {
-    const { meta, body } = parseSkillFile(readFileSync(p, "utf-8"));
+    const raw = readFileSync(p, "utf-8");
+    const { meta, body } = parseSkillFile(raw);
+    // Name/description via the M2 parser — it handles YAML block scalars
+    // (`description: >`), the shape shared skill repos use.
+    const parsed = parseSkillMd(raw, fallbackName);
     return {
-      name: meta["name"] || fallbackName,
+      name: parsed.name || fallbackName,
       path: p,
       content: body,
       scope,
       origin,
       sourceLabel,
-      description: meta["description"],
+      description: parsed.description || undefined,
       argsHint: meta["args"],
     };
   } catch {
@@ -81,23 +86,20 @@ function loadFlatMdSkills(
   return skills;
 }
 
-function loadClaudeSkillDir(
+function loadSkillMdDirs(
   dir: string,
   scope: "project" | "global",
   sourceLabel: string,
+  origin: SkillOrigin = "claude",
 ): Skill[] {
   const skills: Skill[] = [];
   if (!existsSync(dir)) return skills;
   try {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
-      const skill = skillFromFile(
-        join(dir, entry.name, "SKILL.md"),
-        entry.name,
-        scope,
-        "claude",
-        sourceLabel,
-      );
+      const p = join(dir, entry.name, "SKILL.md");
+      if (!existsSync(p)) continue;
+      const skill = skillFromFile(p, entry.name, scope, origin, sourceLabel);
       if (skill) skills.push(skill);
     }
   } catch { /* skip unreadable dir */ }
@@ -117,8 +119,9 @@ export function formatSkillLocation(skill: Skill): string {
 }
 
 /**
- * Discover skills from KlaatCode and (optionally) Claude Code directories.
- * Lower-priority sources are loaded first; native KlaatCode skills win name collisions.
+ * Discover skills from KlaatCode, the cross-agent ecosystem, and (optionally)
+ * Claude Code directories. Lower-priority sources are loaded first; native
+ * KlaatCode skills win name collisions.
  */
 export function loadSkills(opts: SkillLoadOptions): Skill[] {
   const home = opts.homeDir ?? homedir();
@@ -129,12 +132,32 @@ export function loadSkills(opts: SkillLoadOptions): Skill[] {
     for (const s of skills) byName.set(s.name, s);
   };
 
+  // Launching in a subfolder must still see the repo's skills — scan the git
+  // root too (later adds win, so the closer projectRoot copy shadows it).
+  const roots: Array<{ dir: string; label: (rel: string) => string }> = [];
+  const gitRoot = gitRootAbove(opts.projectRoot);
+  if (gitRoot) roots.push({ dir: gitRoot, label: rel => `${rel} (git root)` });
+  roots.push({ dir: opts.projectRoot, label: rel => rel });
+
   if (importClaude) {
-    add(loadClaudeSkillDir(join(home, ".claude", "skills"), "global", "~/.claude/skills"));
-    add(loadClaudeSkillDir(join(opts.projectRoot, ".claude", "skills"), "project", ".claude/skills"));
+    add(loadSkillMdDirs(join(home, ".claude", "skills"), "global", "~/.claude/skills"));
+    for (const r of roots) add(loadSkillMdDirs(join(r.dir, ".claude", "skills"), "project", r.label(".claude/skills")));
   }
+  // M2b: cross-agent ecosystem dirs — `npx skills add <repo>` installs to
+  // .agents/skills, so /caveman-style invocation works for shared skill repos.
+  add(loadSkillMdDirs(join(home, ".agents", "skills"), "global", "~/.agents/skills"));
+  for (const r of roots) {
+    add(loadSkillMdDirs(join(r.dir, ".cursor", "skills"), "project", r.label(".cursor/skills")));
+    add(loadSkillMdDirs(join(r.dir, ".klaatcode", "skills"), "project", r.label(".klaatcode/skills")));
+    add(loadSkillMdDirs(join(r.dir, ".agents", "skills"), "project", r.label(".agents/skills")));
+  }
+  // Native KlaatCode locations — dir-based SKILL.md and flat .md both work.
+  add(loadSkillMdDirs(join(home, ".klaatai", "skills"), "global", "~/.klaatai/skills", "klaatai"));
   add(loadFlatMdSkills(join(home, ".klaatai", "skills"), "global", "~/.klaatai/skills"));
-  add(loadFlatMdSkills(join(opts.projectRoot, ".klaatai", "skills"), "project", ".klaatai/skills"));
+  for (const r of roots) {
+    add(loadSkillMdDirs(join(r.dir, ".klaatai", "skills"), "project", r.label(".klaatai/skills"), "klaatai"));
+    add(loadFlatMdSkills(join(r.dir, ".klaatai", "skills"), "project", r.label(".klaatai/skills")));
+  }
 
   return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
 }

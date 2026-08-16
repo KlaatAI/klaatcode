@@ -359,12 +359,16 @@ export function summarizeTool(tc: ToolCall): string {
 }
 
 /**
- * Cap tool results at ~40k chars before sending them to the model.
- * Large outputs (e.g. a full directory_tree of a big project) will exceed the
- * model's context limit and cause a 400 / 502 error. We truncate and append a
- * clear note so the model knows the data was cut.
+ * Cap tool results before sending them to the model. Large outputs (e.g. a
+ * full directory_tree of a big project) will exceed the model's context limit
+ * and cause a 400 / 502 error. We truncate and append a clear note so the
+ * model knows the data was cut.
+ *
+ * 100k, not 40k: read_file's own cap is ~96 KB (G1 unified read contract) and
+ * this backstop must never bite a read the tool itself allowed — every other
+ * tool already self-caps far below (MAX_OUTPUT 12k / spill-to-disk).
  */
-const MAX_TOOL_RESULT_CHARS = 40_000;
+const MAX_TOOL_RESULT_CHARS = 100_000;
 
 export function truncateToolResult(result: string): string {
   if (result.length <= MAX_TOOL_RESULT_CHARS) return result;

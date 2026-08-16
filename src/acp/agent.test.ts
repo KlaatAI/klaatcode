@@ -53,12 +53,18 @@ mock.module("../permissions/index.js", () => ({
 }));
 
 // No real network/db — indexing isn't what's under test here.
+// NOTE: bun's mock.module leaks across test FILES in the same run, so this
+// mock must export everything tools/index.ts imports from the real module —
+// a missing name breaks unrelated suites with "Export named X not found".
 mock.module("../tools/kg-indexer.js", () => ({
   KGIndexer: class {
     constructor(_client: unknown) { void _client; }
     indexWorkspace(): Promise<void> { return Promise.resolve(); }
+    indexFilePaths(): Promise<void> { return Promise.resolve(); }
     onProgress(): () => void { return () => {}; }
   },
+  enableIncrementalReindex: () => {},
+  noteFileMutated: () => {},
 }));
 // tools/index.ts (unmocked — we want real read_file/write_file execution)
 // also imports from local-db.js, so this must spread the real exports too.

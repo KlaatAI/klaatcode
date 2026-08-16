@@ -40,7 +40,14 @@ const QUEUE = join(DIR, "telemetry-queue.jsonl");
 const SCHEMA_VERSION = "0.1";
 
 const FLUSH_AT_EVENTS = 50;
-const FLUSH_INTERVAL_MS = 10_000;
+/**
+ * Test seam, mirroring the VS Code emitter. Proving the queue survives a kill means
+ * killing the process while events are still buffered; against a 10s interval that is
+ * a hand-timed race you usually lose, and losing it looks like a pass because the
+ * queue file is legitimately absent after a successful flush.
+ * Set KLAATAI_TELEMETRY_FLUSH_MS=120000 to make T0.3 deterministic.
+ */
+const FLUSH_INTERVAL_MS = Number(process.env["KLAATAI_TELEMETRY_FLUSH_MS"]) || 10_000;
 const MAX_QUEUED = 5_000;
 /** ~2MB of metadata is already far past useful; refuse to grow beyond it. */
 const MAX_QUEUE_BYTES = 2 * 1024 * 1024;
@@ -65,6 +72,30 @@ let _flushing = false;
 let _sender: (() => { baseUrl: string; token: string } | null) | null = null;
 
 /**
+ * Diagnostics, off unless KLAATAI_TELEMETRY_DEBUG=1.
+ *
+ * This emitter is fail-silent by design, which means "no events arrived" has several
+ * indistinguishable causes: opted out, not signed in, wrong URL, network refused, or
+ * server rejection. The VS Code emitter had four separate bugs that were only findable
+ * once it could say what it was doing.
+ *
+ * Writes to a FILE, not stderr. The CLI is a full-screen TUI that repaints the
+ * terminal, so anything written to stdout/stderr is either overdrawn or garbles the
+ * display -- unreadable exactly when you need it. Tail the file from a second terminal
+ * instead. Logs event types and counts only, never payloads.
+ */
+const DEBUG = process.env["KLAATAI_TELEMETRY_DEBUG"] === "1";
+const DEBUG_LOG = join(DIR, "telemetry-debug.log");
+
+function dbg(line: string): void {
+  if (!DEBUG) return;
+  try {
+    mkdirSync(DIR, { recursive: true, mode: 0o700 });
+    appendFileSync(DEBUG_LOG, `${new Date().toISOString()} [telemetry] ${line}\n`, { mode: 0o600 });
+  } catch { /* never break on logging */ }
+}
+
+/**
  * Tell the emitter how to reach the API. Called once after auth is resolved;
  * without it, events still queue to disk and go out on a later run.
  */
@@ -72,6 +103,21 @@ export function configureTelemetry(
   resolve: () => { baseUrl: string; token: string } | null,
 ): void {
   _sender = resolve;
+
+  // Opted out: discard anything still queued from before.
+  //
+  // flushTelemetry() already refuses to send while opted out, so without this the
+  // events simply sit on disk forever -- and would be transmitted if the user ever
+  // re-enabled telemetry. Somebody who opts out expects pending data to be dropped,
+  // not parked awaiting a change of mind.
+  if (!telemetryEnabled()) {
+    try {
+      rmSync(QUEUE, { force: true });
+      dbg("opted out -- discarded any queued events");
+    } catch { /* nothing to discard */ }
+    return;
+  }
+
   if (!_timer && telemetryEnabled()) {
     _timer = setInterval(() => { void flushTelemetry(); }, FLUSH_INTERVAL_MS);
     // Do not hold the process open just to flush — the exit hook handles the tail.
@@ -81,7 +127,10 @@ export function configureTelemetry(
 
 /** Queue one event. Never throws, never awaits, never blocks. */
 export function emit(event: KlaatEvent): void {
-  if (!telemetryEnabled()) return;
+  if (!telemetryEnabled()) {
+    dbg(`emit SKIPPED (${event.event_type}) -- telemetry is opted out`);
+    return;
+  }
   try {
     const id = clientIdentity();
     const line = JSON.stringify({
@@ -107,6 +156,7 @@ export function emit(event: KlaatEvent): void {
 
     appendFileSync(QUEUE, line + "\n", { mode: 0o600 });
     _pending++;
+    dbg(`emit: ${event.event_type} -> ${QUEUE} (pending=${_pending})`);
     if (_pending >= FLUSH_AT_EVENTS) void flushTelemetry();
   } catch {
     // Read-only home, full disk, bad JSON: stay silent. Telemetry is never worth
@@ -123,7 +173,12 @@ export function emit(event: KlaatEvent): void {
 export async function flushTelemetry(): Promise<void> {
   if (_flushing || !telemetryEnabled()) return;
   const target = _sender?.();
-  if (!target?.token || !target.baseUrl) return;
+  if (!target?.token || !target.baseUrl) {
+    // Almost always "not signed in yet". The queue is untouched on disk and goes
+    // out on a later run, so nothing is lost.
+    dbg("flush: no auth target -- queue left on disk");
+    return;
+  }
 
   _flushing = true;
   const inflight = `${QUEUE}.${process.pid}.sending`;
@@ -164,9 +219,16 @@ export async function flushTelemetry(): Promise<void> {
       // Retrying forever would pin a growing queue against a permanent error, so
       // drop them. 5xx and network faults fall through to the catch and are kept.
       if (!res.ok && res.status >= 500) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        dbg(`flush: DROPPED ${batch.length} events, HTTP ${res.status} ` +
+            `(url=${target.baseUrl.replace(/\/$/, "")}/v1/events)`);
+      } else {
+        dbg(`flush: ok (${batch.length} accepted)`);
+      }
     }
     rmSync(inflight, { force: true });
-  } catch {
+  } catch (e) {
+    dbg(`flush FAILED, re-queuing from disk: ${String(e)}`);
     // Transient failure: put the batch back so the next run retries it. Events
     // queued meanwhile are in the new QUEUE file and are not disturbed.
     try {

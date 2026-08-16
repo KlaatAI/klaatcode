@@ -126,9 +126,23 @@ export function repoFingerprint(root: string): RepoFingerprint | null {
       workspaces = Boolean(pkg.workspaces);
     } catch { /* no package.json, or unreadable */ }
 
+    // Dependency sniffing misses every runner that ships with its toolchain --
+    // `bun test`, `go test`, `cargo test` need no package entry. Without this fallback
+    // a repo with 36 test files reports test_runner: null, which is worse than no
+    // signal: it tells the router the user does not test.
     if (!testRunner) {
-      if (paths.some((p) => p.startsWith("tests/") || p.endsWith("_test.go"))) testRunner = "go-test";
-      else if (topLevel.has("pytest.ini") || topLevel.has("tox.ini")) testRunner = "pytest";
+      const pm = detectPackageManager(root, topLevel);
+      if (paths.some((p) => p.endsWith("_test.go"))) testRunner = "go-test";
+      else if (topLevel.has("pytest.ini") || topLevel.has("tox.ini")
+               || paths.some((p) => /(^|\/)(test_[^/]+\.py|[^/]+_test\.py)$/.test(p))) {
+        testRunner = "pytest";
+      } else if (paths.some((p) => /\.(test|spec)\.(ts|tsx|js|jsx|mts|cts)$/.test(p))) {
+        // A JS/TS test file with no runner dependency means the toolchain's built-in.
+        testRunner = pm === "bun" ? "bun:test" : "node:test";
+      } else if (topLevel.has("Cargo.toml")
+                 && paths.some((p) => p.startsWith("tests/") && p.endsWith(".rs"))) {
+        testRunner = "cargo-test";
+      }
     }
 
     // Size: exact file count, sampled byte total extrapolated to lines.

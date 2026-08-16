@@ -1,6 +1,17 @@
 import { describe, expect, test } from "bun:test";
-import { collectCriticalState, checkSummaryCoverage } from "./collapse-check.js";
+import {
+  collectCriticalState, checkSummaryCoverage,
+  collectTouchedFiles, parsePriorCumulativeFiles, buildCumulativeFilesLine,
+} from "./collapse-check.js";
 import type { Message } from "../api/client.js";
+
+function toolCallMsg(name: string, args: Record<string, unknown>): Message {
+  return {
+    role: "assistant",
+    content: "",
+    tool_calls: [{ id: "t1", type: "function", function: { name, arguments: JSON.stringify(args) } }],
+  } as Message;
+}
 
 describe("collectCriticalState", () => {
   test("captures the last substantial user message as task intent", () => {
@@ -78,5 +89,57 @@ describe("checkSummaryCoverage", () => {
 
   test("no critical state → nothing to flag", () => {
     expect(checkSummaryCoverage("anything", { taskIntent: null, files: [] })).toHaveLength(0);
+  });
+});
+
+describe("M3 cumulative file tracking", () => {
+  test("collectTouchedFiles picks up reads AND writes, deduped", () => {
+    const span: Message[] = [
+      toolCallMsg("read_file", { path: "src/a.ts" }),
+      toolCallMsg("edit_file", { path: "src/a.ts", old: "x", new: "y" }),
+      toolCallMsg("write_file", { file_path: "src/b.ts", content: "…" }),
+      toolCallMsg("run_command", { command: "bun test" }), // no path — skipped
+      { role: "assistant", content: "no tools here" },
+    ];
+    expect(collectTouchedFiles(span).sort()).toEqual(["src/a.ts", "src/b.ts"]);
+  });
+
+  test("malformed tool args never throw", () => {
+    const bad: Message = {
+      role: "assistant", content: "",
+      tool_calls: [{ id: "t", type: "function", function: { name: "read_file", arguments: "{not json" } }],
+    } as Message;
+    expect(collectTouchedFiles([bad])).toEqual([]);
+  });
+
+  test("prior stub's list is parsed back out and carried forward", () => {
+    const priorStub: Message = {
+      role: "assistant",
+      content:
+        "[Context compacted — summary]\nDid things.\n" +
+        "Cumulative files touched (all context, carried across compactions): src/old1.ts, src/old2.ts\n" +
+        "(details in ledger)",
+    };
+    expect(parsePriorCumulativeFiles([priorStub])).toEqual(["src/old1.ts", "src/old2.ts"]);
+
+    const line = buildCumulativeFilesLine(
+      [priorStub, toolCallMsg("read_file", { path: "src/new.ts" })],
+      ["src/edited.ts"],
+    )!;
+    // Survivors from compaction 1 + this span's reads + session modifications.
+    for (const f of ["src/old1.ts", "src/old2.ts", "src/new.ts", "src/edited.ts"]) {
+      expect(line).toContain(f);
+    }
+  });
+
+  test("over the cap, oldest entries drop first", () => {
+    const span = Array.from({ length: 45 }, (_, i) => toolCallMsg("read_file", { path: `f${i}.ts` }));
+    const line = buildCumulativeFilesLine(span, [])!;
+    expect(line).not.toContain("f0.ts,");
+    expect(line).toContain("f44.ts");
+  });
+
+  test("nothing touched → null (no noise line in the stub)", () => {
+    expect(buildCumulativeFilesLine([{ role: "user", content: "hi" }], [])).toBeNull();
   });
 });

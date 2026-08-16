@@ -8,6 +8,8 @@
  *   1. CORE_SYSTEM_PROMPT      — static identity + tool policy. Never changes.
  *   2. environment block       — cwd, platform, git state. Computed once per session.
  *   3. project rules           — .klaatai/rules.md / AGENTS.md if present.
+ *   4. learned memory          — ~/.klaatai/memory/ (M1), read once per session.
+ *   5. skills index            — .klaatai/skills/ names+descriptions (M2), read once.
  *   (mode prompt — Build/Plan — is inserted per-request AFTER these, see repl.ts)
  */
 
@@ -17,6 +19,8 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import type { Message } from "../api/client.js";
 import { loadConfig, loadCredentials } from "../auth/credentials.js";
+import { memorySystemBlock } from "./memory.js";
+import { skillsSystemBlock } from "./skills.js";
 import { version as VERSION } from "../../package.json";
 
 export const CORE_SYSTEM_PROMPT = `You are Klaat Code, an AI coding agent that operates in the user's terminal. You help with software engineering tasks: fixing bugs, adding features, refactoring, explaining code, and running commands.
@@ -47,8 +51,8 @@ You ALWAYS have filesystem and shell access through your tools (read_file, run_c
 - Use edit_file for surgical changes to existing files; multi_edit for several changes to the same file (atomic); write_file only for new files or full rewrites.
 - CODE GRAPH FIRST — this project is indexed into a code graph; use it as your primary navigation tool:
   - For any task that touches more than one file, call plan_exploration FIRST with the task text — it returns the optimal file-read order (what to outline, what to read, which section). Follow the plan instead of reading files in discovery order.
-  - For ANY "where is X / what calls Y / which files handle Z" question, call project_graph_query FIRST — before grep or read_file. It returns exact file:line + caller/callee relationships in one call.
-  - Use file_outline instead of read_file when you only need a file's structure (~200 tokens vs 2,000+); then read_file with offset/limit for just the part you need.
+  - For ANY "where is X / what calls Y / which files handle Z / how does X work" question, call project_graph_query FIRST — before grep or read_file. It returns exact file:line + caller/callee relationships in one call. Explaining a subsystem rarely needs more than the graph result plus 1-2 symbol reads.
+  - Use file_outline instead of read_file when you only need a file's structure (~200 tokens vs 2,000+); then read_file with symbol="Name" for just the definition you need. Do not page through a file with small offset/limit windows — one read_file call returns up to 1000 lines.
   - Call impact_check before editing any exported function/class/interface — know the blast radius first.
   - Use project_semantic_search to find code by meaning when you don't know the name.
   - Fall back to grep/read_file only when the graph returns nothing or the file isn't indexed yet.
@@ -130,6 +134,9 @@ export function buildEnvironmentBlock(projectRoot: string, ledgerPath?: string):
     sessionInfo(),
     `Working directory: ${projectRoot}`,
     `Platform: ${process.platform} (${process.arch})`,
+    `Shell (run_command): ${process.platform === "win32"
+      ? "cmd.exe — write Windows command syntax (dir, findstr, type); POSIX-only commands like find/grep/cat via sh are NOT available. Prefer the grep/glob/read_file tools over shell for anything file-related."
+      : "sh"}`,
     `Date: ${new Date().toISOString().slice(0, 10)}`,
     gitInfo(projectRoot),
     `Top-level entries: ${topLevel(projectRoot)}`,
@@ -218,6 +225,14 @@ export function seedSystemMessages(projectRoot: string, ledgerPath?: string): Me
   ];
   const rules = loadProjectRules(projectRoot);
   if (rules) seed.push({ role: "system", content: rules });
+  // M1: learned memory — read ONCE here so the block is byte-stable for the
+  // whole session (prefix-cache law). New learnings land next session.
+  const memory = memorySystemBlock(projectRoot);
+  if (memory) seed.push({ role: "system", content: memory });
+  // M2: skills index — name+description only (progressive disclosure); the
+  // model reads a SKILL.md body on demand. Same once-per-session read.
+  const skills = skillsSystemBlock(projectRoot);
+  if (skills) seed.push({ role: "system", content: skills });
   return seed;
 }
 

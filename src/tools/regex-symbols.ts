@@ -3,7 +3,7 @@
  * Fast enough for background indexing; tree-sitter upgrade is optional later.
  */
 
-export type SymKind = "function" | "method" | "class" | "interface" | "type" | "enum" | "variable" | "other";
+export type SymKind = "function" | "method" | "class" | "interface" | "type" | "enum" | "variable" | "other" | "section";
 
 export interface ExtractedSymbol {
   name: string;

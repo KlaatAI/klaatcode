@@ -25,6 +25,7 @@ import {
   enableMouse, disableMouse,
   enableKitty, disableKitty,
   enableBracketedPaste, disableBracketedPaste,
+  disableAutowrap,
 } from "./terminal.js";
 import { CellBuffer } from "./buffer.js";
 import { InputParser, type KeyEvent, type MouseEvent } from "./input.js";
@@ -299,6 +300,11 @@ export class App extends EventEmitter {
     enterAltScreen();
     hideCursor();
     clearScreen();
+    // Autowrap OFF for the full-screen session: with it on, painting the
+    // bottom-right cell arms "pending wrap" and the next stray byte on stdout
+    // scrolls the whole alt screen — every row is then off by one vs the
+    // front buffer until the next full clear. restoreTerminal() re-enables.
+    disableAutowrap();
     enableMouse();
     enableKitty();
     enableBracketedPaste();
@@ -436,6 +442,7 @@ export class App extends EventEmitter {
       enterAltScreen();
       hideCursor();
       clearScreen();
+      disableAutowrap();
     }
     enableMouse();
     enableKitty();
@@ -443,6 +450,18 @@ export class App extends EventEmitter {
     this._input.start();
     if (this._inline) this._handleResizeInline();
     else this._handleResize();
+  }
+
+  /**
+   * Repaint the entire screen from scratch (Ctrl+L convention). The recovery
+   * path when something outside the renderer corrupted the display — a
+   * dependency writing to stdout, a terminal glitch, a resize race.
+   */
+  forceRedraw(): void {
+    if (!this._running || this._inline) return;
+    clearScreen();
+    this._cellBuf.invalidate();
+    this.requestRender();
   }
 
   /** Stop the event loop and restore the terminal to its previous state. */

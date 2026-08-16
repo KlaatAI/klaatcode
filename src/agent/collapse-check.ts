@@ -55,6 +55,63 @@ export function collectCriticalState(span: Message[], modifiedFiles: string[]): 
   return { taskIntent, files: [...new Set(modifiedFiles)].slice(0, 20) };
 }
 
+// ─── M3: cumulative file-op tracking across compactions ─────────────────────
+// prime-agent finding: each compaction summary must carry forward the file
+// lists from PRIOR summaries, or after 2-3 compactions the model no longer
+// knows which files it touched early in the session. The list rides inside
+// the summary stub itself (a marker line), so it survives any number of
+// compactions without extra session state.
+
+const CUMULATIVE_FILES_RE = /Cumulative files touched[^:]*:\s*([^\n]+)/;
+const CUMULATIVE_FILES_CAP = 40;
+
+/** Every file named in a tool call's path argument within a span — reads AND
+ * writes; knowing what was already read prevents pointless re-exploration. */
+export function collectTouchedFiles(span: Message[]): string[] {
+  const files = new Set<string>();
+  for (const m of span) {
+    if (m.role !== "assistant" || !m.tool_calls) continue;
+    for (const tc of m.tool_calls) {
+      try {
+        const args = JSON.parse(tc.function.arguments) as Record<string, unknown>;
+        for (const key of ["path", "file_path", "filePath"]) {
+          const v = args[key];
+          if (typeof v === "string" && v.trim()) { files.add(v.trim()); break; }
+        }
+      } catch { /* malformed args — skip */ }
+    }
+  }
+  return [...files];
+}
+
+/** Recover the carried-forward list from a prior compaction stub in the span. */
+export function parsePriorCumulativeFiles(span: Message[]): string[] {
+  const files: string[] = [];
+  for (const m of span) {
+    const c = typeof m.content === "string" ? m.content : "";
+    const match = CUMULATIVE_FILES_RE.exec(c);
+    if (!match) continue;
+    for (const f of match[1]!.split(/,\s*/)) if (f.trim()) files.push(f.trim());
+  }
+  return files;
+}
+
+/**
+ * The marker line appended to each new compaction stub: prior list (parsed
+ * from any earlier stub in the span) + files touched in this span + files
+ * modified this session. Over the cap, the OLDEST entries drop first — recent
+ * work matters more. Null when the session touched nothing.
+ */
+export function buildCumulativeFilesLine(span: Message[], modifiedFiles: string[]): string | null {
+  const merged = [...new Set([
+    ...parsePriorCumulativeFiles(span),
+    ...collectTouchedFiles(span),
+    ...modifiedFiles,
+  ])];
+  if (merged.length === 0) return null;
+  return `Cumulative files touched (all context, carried across compactions): ${merged.slice(-CUMULATIVE_FILES_CAP).join(", ")}`;
+}
+
 const INTENT_COVERAGE_MIN = 0.4; // ≥40% of significant task words must survive
 
 /**

@@ -90,6 +90,32 @@ Do the foo task for $ARGUMENTS`,
     expect(skills[0]!.sourceLabel).toBe(".klaatai/skills");
   });
 
+  test("discovers .agents/skills (npx skills add) with folded-block description", () => {
+    const dir = join(projectRoot, ".agents", "skills", "caveman");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "SKILL.md"),
+      "---\nname: caveman\ndescription: >\n  Ultra-compressed mode.\n  Cuts tokens.\n---\nRespond terse.",
+    );
+
+    const skills = loadSkills({ projectRoot, homeDir });
+    expect(skills).toHaveLength(1);
+    expect(skills[0]!.name).toBe("caveman");
+    expect(skills[0]!.description).toBe("Ultra-compressed mode. Cuts tokens.");
+    expect(skills[0]!.content).toBe("Respond terse.");
+    expect(formatSkillLocation(skills[0]!)).toBe("project · .agents/skills");
+  });
+
+  test("dir-based .klaatai/skills/<name>/SKILL.md is native too", () => {
+    const dir = join(projectRoot, ".klaatai", "skills", "deploy");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "SKILL.md"), "---\nname: deploy\ndescription: how we ship\n---\nBody");
+
+    const skills = loadSkills({ projectRoot, homeDir });
+    expect(skills).toHaveLength(1);
+    expect(skills[0]!.origin).toBe("klaatai");
+  });
+
   test("skips Claude roots when importClaudeSkills is false", () => {
     const skillDir = join(projectRoot, ".claude", "skills", "only-claude");
     mkdirSync(skillDir, { recursive: true });

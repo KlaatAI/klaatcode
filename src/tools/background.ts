@@ -5,6 +5,7 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
+import { shellCommand } from "./shell.js";
 
 interface BgShell {
   id: string;
@@ -24,7 +25,8 @@ let counter = 0;
 /** Start a command in the background. Returns its id. */
 export function startBackground(command: string, cwd: string): string {
   const id = `sh-${++counter}`;
-  const proc = spawn("sh", ["-c", command], { cwd });
+  const sh = shellCommand(command);
+  const proc = spawn(sh.exe, sh.args, { cwd });
   const s: BgShell = { id, command, proc, buf: "", readOffset: 0, done: false, exitCode: null, startedAt: Date.now() };
 
   const append = (chunk: Buffer) => {

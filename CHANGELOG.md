@@ -5,6 +5,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); version
 
 ## [Unreleased]
 
+## [2.5.0] — 2026-08-16
+
+### Added
+
+- **Code graph, everywhere.** Your project is indexed into a local code graph (tree-sitter quality, all plans including free) and the agent navigates with it instead of grepping around: `project_graph_query` answers "where is X / what calls Y" with exact file:line, `file_outline` reads a file's structure for ~10% of the tokens, `read_file symbol="Name"` serves exactly one definition, `impact_check` shows the blast radius before an edit, and `plan_exploration` returns the optimal read order for a task. Directory listings append a graph outline (top symbols per file, community labels). Markdown docs are indexed as heading sections, so READMEs and plans are searchable too. `/graph` opens an interactive force-graph of the whole project in your browser — communities colored, god nodes sized, search and legend filters.
+- **Cross-session memory — the agent learns you.** Every few turns a background pass distills durable facts into `~/.klaatai/memory/`: project memory (commands that worked, conventions, decisions, corrections) and user memory (how you like to work). Both load at session start, so the next session already knows "uses bun not npm" and never repeats a correction you already made. `/memory` views, `/memory update` forces a pass, `/memory clear` forgets, and `/memory graph` renders your persona as a labeled graph in the browser. Shared with the VS Code extension — teach the terminal, the editor remembers.
+- **Skills — reusable playbooks with progressive disclosure.** Drop a `SKILL.md` in `.klaatai/skills/<name>/` (project) or `~/.klaatai/skills/` (global) and the agent follows it whenever a task matches: only name + description ride in the prompt; the body loads on demand. Invoke directly with `/<name> [args]` (autocompleted in the `/` strip), list with `/skill`, create with `/skill new`. Interops with the open skills ecosystem: repos installed via `npx skills add <repo>` (the cross-agent `.agents/skills/` convention, YAML folded-block frontmatter, Claude Code `.claude/skills/`) are discovered from any subfolder of the repo.
+
+### Fixed
+
+- **Windows, seriously.** `run_command` and every other shell site now use `cmd.exe` instead of spawning a nonexistent `sh` (commands ran nowhere and turns died mid-sentence); grep is in-process JavaScript, so a missing grep binary can no longer masquerade as "No matches found"; the write sandbox no longer misjudges cross-drive paths; protected system paths (`C:\Windows`, Program Files) are properly refused.
+- **Stuck text and garbled UI.** Wide (CJK/emoji) glyphs could leave permanently stuck fragments on screen when overlapped by other UI — the renderer now breaks wide-glyph pairs correctly. Skill invocations show a compact `/name` line instead of dumping the whole playbook into the transcript.
+- **Compaction correctness.** The post-compaction tail can no longer start with orphaned tool results (a provider-rejection class of failure), and every compaction summary carries a cumulative list of files touched — after any number of compactions the agent still knows every file it worked on all session.
+- **Graph queries answer natural language.** Multi-word queries ("authentication auth login session token") fall back to per-keyword scoring instead of one exact-phrase match that found nothing.
+- **Honest reads.** One `read_file` call returns up to 1000 lines; descriptions no longer invite the model to page through files in 100-line slices, and duplicate overlapping reads are short-circuited with an honest notice.
+
 ## [2.4.4] — 2026-08-08
 
 ### Fixed

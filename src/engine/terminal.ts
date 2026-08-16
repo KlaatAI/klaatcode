@@ -50,6 +50,22 @@ export function eraseLine(): string {
   return `${ESC}[2K`;
 }
 
+// ─── Autowrap (DECAWM) ────────────────────────────────────────────────────────
+// Full-screen TUI must run with autowrap OFF: painting the bottom-right cell
+// otherwise arms "pending wrap", and the next byte anyone writes (a stray
+// console.log from a dependency is enough) scrolls the whole alt screen one
+// line — the front buffer is then wrong for EVERY row and the UI shows
+// stacked stale lines until the next full clear. Wrap-off also turns any
+// char-width miscount at a row edge into a clipped glyph instead of a wrap.
+
+export function disableAutowrap(): void {
+  process.stdout.write(`${ESC}[?7l`);
+}
+
+export function enableAutowrap(): void {
+  process.stdout.write(`${ESC}[?7h`);
+}
+
 // ─── Mouse support ────────────────────────────────────────────────────────────
 
 export function enableMouse(): void {
@@ -129,6 +145,7 @@ export function termWrite(s: string): void {
  */
 export function restoreTerminal(): void {
   showCursor();
+  enableAutowrap();
   exitAltScreen();
   setRawMode(false);
 }

@@ -1,11 +1,14 @@
 /**
  * CLI Knowledge-graph indexer — runs silently in the background after login.
  *
- * Paywall model:
- *   - Server enforces plan check on /v1/graph/projects/{id}/index.
- *   - Free users get 403 → local DB never populated → graph tools degrade gracefully.
- *   - Pro users: server + local DB both populated.  Local is a reliability cache
- *     (offline / 5xx) — not a free-tier bypass.
+ * Paywall model (G3, 2026-08-15 — local graph for ALL tiers):
+ *   - Local SQLite index is populated for every authenticated user. Local
+ *     build/store/query costs us nothing, and graph-first retrieval saves us
+ *     tokens on exactly the tiers that burn the most per task.
+ *   - The server copy is the paid layer: /index soft-caps free accounts and
+ *     may 402/403; that gates SERVER sync only — local indexing always
+ *     completes. Cross-device graphs, pre-warm, and semantic embeddings
+ *     remain the Pro+ perks.
  */
 
 import { createHash } from "node:crypto";
@@ -14,10 +17,14 @@ import { join, relative } from "node:path";
 import { readdirSync, statSync } from "node:fs";
 import { resolveProjectId, type ProjectInfo } from "../utils/project-id.js";
 import { extractSymbols, extractCallEdges } from "./regex-symbols.js";
+import { extractDocSections } from "./doc-sections.js";
+import { initTreeSitter, parseWithTreeSitter } from "./treesitter.js";
 import {
   localDbDiff, localDbIndexFiles, localDbIndexEdges,
   localDbGetSymbolsForEmbedding, localDbGetUnembeddedSymbols, localDbWriteEmbeddings,
+  localDbFileGraph, localDbWriteCommunities,
 } from "./local-db.js";
+import { detectCommunities, labelCommunities } from "./graph-communities.js";
 import { embedPassages } from "./code-embedder.js";
 import type { KlaatAIClient } from "../api/client.js";
 
@@ -27,6 +34,7 @@ const GLOB_EXTS = new Set([
   "py", "go", "rs", "java", "kt", "kts", "swift", "php", "rb", "cs",
   "c", "h", "cc", "cpp", "cxx", "hpp", "m", "mm",
   "vue", "svelte", "scala", "dart", "lua", "ex", "exs", "sh", "bash",
+  "md", "mdx", // G4b: docs enter the graph as heading-section nodes
 ]);
 const EXCLUDE_DIRS = new Set([
   "node_modules", ".git", "dist", "build", ".next", "out",
@@ -38,9 +46,12 @@ const LANG_BY_EXT: Record<string, string> = {
   js: "javascript", jsx: "javascript", mjs: "javascript", cjs: "javascript",
   py: "python", go: "go", rs: "rust", java: "java", kt: "kotlin", kts: "kotlin",
   swift: "swift", php: "php", rb: "ruby", cs: "csharp",
+  md: "markdown", mdx: "markdown",
 };
 
 export type IndexStatus = "idle" | "scanning" | "indexing" | "done" | "error";
+
+type BuiltFile = NonNullable<Awaited<ReturnType<typeof _buildFile>>>;
 
 export interface IndexProgress {
   status: IndexStatus;
@@ -142,13 +153,20 @@ export class KGIndexer {
       this._emit({ status: "indexing", total: stale.length, indexed: 0 });
       let indexed = 0;
       let symbols = 0;
+      // Plan gate tripped: stop TALKING to the server, keep indexing locally.
+      // The old behaviour aborted the whole run here, which threw away the
+      // local graph for exactly the users whose grep/read fallback costs the
+      // most tokens.
+      let serverGated = false;
 
-      const allBuilt: NonNullable<ReturnType<typeof _buildFile>>[] = [];
+      await initTreeSitter(); // one-time; falls back to regex permanently on failure
+
+      const allBuilt: BuiltFile[] = [];
       for (let i = 0; i < stale.length; i += FILE_BATCH) {
         const batch = stale.slice(i, i + FILE_BATCH);
-        const built = batch
-          .map((f) => _buildFile(f.absPath, f.relPath, f.hash))
-          .filter((f): f is NonNullable<typeof f> => f !== null);
+        const built = (await Promise.all(
+          batch.map((f) => _buildFile(f.absPath, f.relPath, f.hash)),
+        )).filter((f): f is BuiltFile => f !== null);
         allBuilt.push(...built);
 
         const batchSymbols = built.reduce((n, f) => n + f.symbols.length, 0);
@@ -158,29 +176,23 @@ export class KGIndexer {
           localDbIndexFiles(proj.id, proj.name, proj.rootPath, proj.gitRemote, built);
         } catch { /* non-fatal */ }
 
-        // Upload to server — this is where the paywall fires.
-        // 403 = not on Pro plan; local DB will still have data but server won't.
-        const res = await this._client.graphIndex(proj.id, {
-          project_name: proj.name,
-          root_path: proj.rootPath,
-          git_remote: proj.gitRemote,
-          total_files: hashed.length,
-          files: built,
-        });
-
-        if (res.ok) {
-          indexed += batch.length;
-          symbols += batchSymbols;
-        } else if (res.status === 403 || res.status === 402) {
-          // Plan gate — stop indexing, don't retry.
-          this._emit({
-            status: "error",
-            message: "Graph indexing requires a Pro plan — upgrade at klaatai.com/pricing",
+        // Upload to server — best-effort. 402/403 = plan gate on the SERVER
+        // copy only; 5xx = transient. Neither stops local indexing.
+        if (!serverGated) {
+          const res = await this._client.graphIndex(proj.id, {
+            project_name: proj.name,
+            root_path: proj.rootPath,
+            git_remote: proj.gitRemote,
+            total_files: hashed.length,
+            files: built,
           });
-          return;
+          if (res.status === 403 || res.status === 402) {
+            serverGated = true;
+          }
         }
-        // Other errors (5xx) — continue with remaining batches.
 
+        indexed += batch.length;
+        symbols += batchSymbols;
         this._emit({ indexed, symbols, message: `Indexed ${indexed} of ${stale.length} file(s)` });
       }
 
@@ -201,20 +213,78 @@ export class KGIndexer {
           localDbIndexEdges(proj.id, allBuilt.map((b) => b.path), localEdges);
           edgeCount = localEdges.length;
         } catch { /* non-fatal */ }
-        // Push to server /edges in capped batches (best-effort; ignores paywall).
-        try {
-          for (let i = 0; i < serverEdges.length; i += 200) {
-            await this._client.graphEdges(proj.id, serverEdges.slice(i, i + 200));
-          }
-        } catch { /* non-fatal */ }
+        // Push to server /edges in capped batches (best-effort; skipped once
+        // the plan gate fired — symbols aren't there for edges to resolve to).
+        if (!serverGated) {
+          try {
+            for (let i = 0; i < serverEdges.length; i += 200) {
+              await this._client.graphEdges(proj.id, serverEdges.slice(i, i + 200));
+            }
+          } catch { /* non-fatal */ }
+        }
       }
 
-      this._emit({ status: "done", indexed, total: stale.length, symbols, edges: edgeCount, message: `Indexed ${indexed} file(s), ${symbols} symbol(s), ${edgeCount} edge(s)` });
+      _recomputeCommunities(proj.id);
+
+      this._emit({
+        status: "done", indexed, total: stale.length, symbols, edges: edgeCount,
+        message: `Indexed ${indexed} file(s), ${symbols} symbol(s), ${edgeCount} edge(s)` +
+          (serverGated ? " — local graph ready; cross-device sync requires Pro" : ""),
+      });
 
       // Fire-and-forget embedding pass (non-blocking)
       void this._embedChangedSymbols(proj.id, allBuilt.map((b) => b.path));
     } catch (e) {
       this._emit({ status: "error", message: `Indexing failed: ${String(e)}` });
+    } finally {
+      this._running = false;
+    }
+  }
+
+  /**
+   * Incremental (G3): reindex just these files after an agent edit — the graph
+   * must not go stale the moment the agent starts changing code, or every
+   * graph answer about edited files is wrong until the next full run.
+   *
+   * Local-only by design: the server sync happens on the next full run
+   * (session start). An incremental /index upload would clobber the project's
+   * total_files stat with a tiny number, and freshness is a LOCAL problem.
+   */
+  async indexFilePaths(projectRoot: string, absPaths: string[]): Promise<void> {
+    if (this._running) return; // a full run is in flight and will cover these
+    const proj = resolveProjectId(projectRoot);
+    if (!proj) return;
+    this._running = true;
+    try {
+      await initTreeSitter();
+      const built: BuiltFile[] = [];
+      for (const absPath of absPaths) {
+        if (!existsSync(absPath)) continue; // deleted — next full run prunes it
+        try {
+          const bytes = readFileSync(absPath);
+          const hash = createHash("sha256").update(bytes).digest("hex");
+          const b = await _buildFile(absPath, relative(projectRoot, absPath), hash);
+          if (b) built.push(b);
+        } catch { /* unreadable — skip */ }
+      }
+      if (built.length === 0) return;
+
+      try {
+        localDbIndexFiles(proj.id, proj.name, proj.rootPath, proj.gitRemote, built);
+      } catch { /* non-fatal */ }
+
+      const localEdges: { from: string; fromFile: string; to: string }[] = [];
+      for (const b of built) {
+        for (const [caller, callees] of Object.entries(b.calls ?? {})) {
+          for (const callee of callees) localEdges.push({ from: caller, fromFile: b.path, to: callee });
+        }
+      }
+      if (localEdges.length > 0) {
+        try { localDbIndexEdges(proj.id, built.map((b) => b.path), localEdges); } catch { /* non-fatal */ }
+      }
+      _recomputeCommunities(proj.id);
+
+      void this._embedChangedSymbols(proj.id, built.map((b) => b.path));
     } finally {
       this._running = false;
     }
@@ -246,6 +316,62 @@ export class KGIndexer {
   }
 }
 
+// ─── Community recompute (G4) ────────────────────────────────────────────────
+// Louvain over the file graph after every index write. A few hundred nodes —
+// milliseconds — so freshness beats cleverness; capped defensively for
+// monorepos where the file graph itself is huge.
+
+const MAX_COMMUNITY_NODES = 5_000;
+
+function _recomputeCommunities(projectId: string): void {
+  try {
+    const g = localDbFileGraph(projectId);
+    if (g.nodes.length === 0 || g.nodes.length > MAX_COMMUNITY_NODES) return;
+    const assign = detectCommunities(g.nodes, g.edges);
+    const labels = labelCommunities(assign);
+    localDbWriteCommunities(
+      projectId,
+      [...assign].map(([path, community]) => ({
+        path, community, label: labels.get(community) ?? "",
+      })),
+    );
+  } catch { /* non-fatal — graph works without communities */ }
+}
+
+// ─── Incremental reindex queue (G3) ──────────────────────────────────────────
+// The tool layer (write_file/edit_file/multi_edit) notes mutations here; the
+// REPL's indexer instance registers itself and drains the queue on a debounce.
+// Decoupled so tools/index.ts never needs a client or an indexer reference.
+
+let _incIndexer: KGIndexer | null = null;
+let _incRoot = "";
+const _incPending = new Set<string>();
+let _incTimer: ReturnType<typeof setTimeout> | null = null;
+const INCREMENTAL_DEBOUNCE_MS = 2_000;
+
+/** Called once by the session owner (repl) after constructing its KGIndexer. */
+export function enableIncrementalReindex(indexer: KGIndexer, projectRoot: string): void {
+  _incIndexer = indexer;
+  _incRoot = projectRoot;
+}
+
+/** Note a mutated file; batched + debounced so an edit burst indexes once. */
+export function noteFileMutated(absPath: string): void {
+  if (!_incIndexer || !absPath.startsWith(_incRoot)) return;
+  const ext = absPath.split(".").pop()?.toLowerCase() ?? "";
+  if (!GLOB_EXTS.has(ext)) return;
+  _incPending.add(absPath);
+  if (_incTimer) clearTimeout(_incTimer);
+  _incTimer = setTimeout(() => {
+    _incTimer = null;
+    const paths = [..._incPending];
+    _incPending.clear();
+    void _incIndexer?.indexFilePaths(_incRoot, paths);
+  }, INCREMENTAL_DEBOUNCE_MS);
+  // Never keep the process alive just for a pending reindex.
+  (_incTimer as { unref?: () => void }).unref?.();
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function _walkFiles(dir: string): string[] {
@@ -270,17 +396,26 @@ function _walkFiles(dir: string): string[] {
   return results;
 }
 
-function _buildFile(
+async function _buildFile(
   absPath: string,
   relPath: string,
   hash: string,
-): { path: string; language: string; hash: string; symbols: ReturnType<typeof extractSymbols>; calls: Record<string, string[]> } | null {
+): Promise<{ path: string; language: string; hash: string; symbols: ReturnType<typeof extractSymbols>; calls: Record<string, string[]> } | null> {
   const ext = relPath.split(".").pop()?.toLowerCase() ?? "";
   const language = LANG_BY_EXT[ext] ?? ext;
   try {
     const text = readFileSync(absPath, "utf-8");
-    const symbols = extractSymbols(language, ext, text);
-    const calls = extractCallEdges(text, symbols);
+    // G4b: markdown has no tree-sitter grammar loaded — its "symbols" are
+    // heading sections, and docs have no call edges.
+    if (ext === "md" || ext === "mdx") {
+      const base = relPath.split(/[\\/]/).pop() ?? relPath;
+      return { path: relPath, language, hash, symbols: extractDocSections(text, base), calls: {} };
+    }
+    // Tree-sitter first (exact spans, methods, nested + call edges — G3);
+    // regex fallback keeps behaviour identical when wasm is unavailable.
+    const parsed = await parseWithTreeSitter(ext, text);
+    const symbols = parsed ? parsed.symbols : extractSymbols(language, ext, text);
+    const calls = parsed ? parsed.calls : extractCallEdges(text, symbols);
     return { path: relPath, language, hash, symbols, calls };
   } catch {
     return { path: relPath, language, hash, symbols: [], calls: {} };

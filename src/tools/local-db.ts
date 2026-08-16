@@ -29,6 +29,10 @@ export interface LocalSymbol {
   signature?: string | null;
   callers?: string[];
   callees?: string[];
+  /** Community label of the containing file (G4), e.g. "src/auth". */
+  community?: string | null;
+  /** End line of the symbol span (G5 graph-aware read). */
+  end_line?: number | null;
 }
 
 export interface LocalCaller {
@@ -116,6 +120,9 @@ function _initSchema(): void {
   // Migrate older DBs that are missing the signature column.
   try { _db.exec("ALTER TABLE symbols ADD COLUMN signature TEXT"); } catch {}
   try { _db.exec("ALTER TABLE symbols ADD COLUMN embedding BLOB"); } catch {}
+  // G4: community per file (Louvain over the file graph; see graph-communities.ts).
+  try { _db.exec("ALTER TABLE files ADD COLUMN community INTEGER"); } catch {}
+  try { _db.exec("ALTER TABLE files ADD COLUMN community_label TEXT"); } catch {}
 }
 
 // ─── Read operations ──────────────────────────────────────────────────────────
@@ -149,9 +156,10 @@ export function localDbQuery(
   const kindClause = kind ? " AND s.kind = ?" : "";
   const kindParams: unknown[] = kind ? [kind] : [];
   const like = `%${query}%`;
-  const rows = _db
+  let rows = _db
     .prepare(
-      `SELECT s.name, s.kind, f.path AS file, s.start_line AS line, s.is_exported, s.signature
+      `SELECT s.name, s.kind, f.path AS file, s.start_line AS line, s.is_exported, s.signature,
+              f.community_label AS community
        FROM symbols s
        JOIN files f ON f.id = s.file_id
        WHERE s.project_id = ?${kindClause}
@@ -164,6 +172,12 @@ export function localDbQuery(
        LIMIT ?`,
     )
     .all(projectId, ...kindParams, like, like, query, `${query}%`, limit) as LocalSymbol[];
+
+  // Models write natural-language queries ("klaatai login command entrypoint");
+  // a whole-phrase substring can never match a symbol name, so every such
+  // query came back "No symbols found" (seen live). Fall back to per-keyword
+  // matching scored by hits — name hits count double vs path hits.
+  if (rows.length === 0) rows = _keywordFallback(projectId, query, kindClause, kindParams, limit);
 
   if (rows.length === 0) return rows;
 
@@ -181,11 +195,60 @@ export function localDbQuery(
   }));
 }
 
+/** Words too generic to identify a symbol — dropped before keyword matching. */
+const _QUERY_STOPWORDS = new Set([
+  "the", "and", "for", "our", "with", "from", "that", "this", "into", "how",
+  "what", "where", "does", "work", "works", "code", "file", "files", "project",
+]);
+
+function _keywordFallback(
+  projectId: string,
+  query: string,
+  kindClause: string,
+  kindParams: unknown[],
+  limit: number,
+): LocalSymbol[] {
+  if (!_db) return [];
+  const tokens = [...new Set(
+    query.toLowerCase().split(/[^a-z0-9_]+/i).filter(t => t.length >= 3 && !_QUERY_STOPWORDS.has(t)),
+  )].slice(0, 8);
+  if (tokens.length === 0) return [];
+  const stmt = _db.prepare(
+    `SELECT s.name, s.kind, f.path AS file, s.start_line AS line, s.is_exported, s.signature,
+            f.community_label AS community
+     FROM symbols s
+     JOIN files f ON f.id = s.file_id
+     WHERE s.project_id = ?${kindClause} AND (s.name LIKE ? OR f.path LIKE ?)
+     LIMIT ?`,
+  );
+  const scored = new Map<string, { sym: LocalSymbol; score: number }>();
+  for (const tok of tokens) {
+    const like = `%${tok}%`;
+    for (const sym of stmt.all(projectId, ...kindParams, like, like, limit * 4) as LocalSymbol[]) {
+      const key = `${sym.file}:${sym.line}:${sym.name}`;
+      const nameHit = sym.name.toLowerCase().includes(tok);
+      const inc = nameHit ? 2 : 1;
+      const cur = scored.get(key);
+      if (cur) cur.score += inc;
+      else {
+        // Static bonuses once per symbol: exported = the file's public face;
+        // test files are rarely what a navigation query is after.
+        const bonus = (sym.is_exported ? 1 : 0) - (/\.(test|spec)\./.test(sym.file) ? 1 : 0);
+        scored.set(key, { sym, score: inc + bonus });
+      }
+    }
+  }
+  return [...scored.values()]
+    .sort((a, b) => b.score - a.score || a.sym.name.localeCompare(b.sym.name))
+    .slice(0, limit)
+    .map(e => e.sym);
+}
+
 export function localDbFileSymbols(projectId: string, filePath: string): LocalSymbol[] {
   if (!_db) return [];
   return _db
     .prepare(
-      `SELECT s.name, s.kind, f.path AS file, s.start_line AS line, s.is_exported, s.signature
+      `SELECT s.name, s.kind, f.path AS file, s.start_line AS line, s.end_line, s.is_exported, s.signature
        FROM symbols s
        JOIN files f ON f.id = s.file_id
        WHERE s.project_id = ? AND f.path = ?
@@ -320,6 +383,130 @@ export function localDbIndexEdges(
     for (const fp of changedFilePaths) del.run(projectId, fp);
     for (const e of edges) ins.run(projectId, e.from, e.fromFile, e.to);
   })();
+}
+
+// ─── Communities & god nodes (G4) ────────────────────────────────────────────
+
+/** The file graph: nodes = indexed paths, edges = symbol calls aggregated to
+ *  file level (to_sym resolved by name — ambiguous names spread weight, which
+ *  is acceptable noise at community granularity). */
+export function localDbFileGraph(
+  projectId: string,
+): { nodes: string[]; edges: Array<{ a: string; b: string; w: number }> } {
+  if (!_db) return { nodes: [], edges: [] };
+  const nodes = (_db.prepare("SELECT path FROM files WHERE project_id = ?")
+    .all(projectId) as { path: string }[]).map((r) => r.path);
+  const edges = _db.prepare(`
+    SELECT e.from_file AS a, f2.path AS b, COUNT(*) AS w
+    FROM edges e
+    JOIN symbols s ON s.project_id = e.project_id AND s.name = e.to_sym
+    JOIN files f2 ON f2.id = s.file_id
+    WHERE e.project_id = ? AND e.from_file <> f2.path
+    GROUP BY e.from_file, f2.path
+  `).all(projectId) as Array<{ a: string; b: string; w: number }>;
+  return { nodes, edges };
+}
+
+export function localDbWriteCommunities(
+  projectId: string,
+  rows: Array<{ path: string; community: number; label: string }>,
+): void {
+  if (!_db || rows.length === 0) return;
+  const stmt = _db.prepare(
+    "UPDATE files SET community = ?, community_label = ? WHERE project_id = ? AND path = ?",
+  );
+  _db.transaction(() => {
+    for (const r of rows) stmt.run(r.community, r.label, projectId, r.path);
+  })();
+}
+
+/** Communities with sizes, largest first — repo overview + G7 legend. */
+export function localDbCommunities(
+  projectId: string,
+): Array<{ community: number; label: string; files: number }> {
+  if (!_db) return [];
+  try {
+    return _db.prepare(`
+      SELECT community, community_label AS label, COUNT(*) AS files
+      FROM files
+      WHERE project_id = ? AND community IS NOT NULL
+      GROUP BY community, community_label
+      ORDER BY files DESC, community
+    `).all(projectId) as Array<{ community: number; label: string; files: number }>;
+  } catch { return []; }
+}
+
+/** Per-file community + symbol count — the G7 visualization's node list. */
+export function localDbFileCommunityRows(
+  projectId: string,
+): Array<{ path: string; community: number; label: string; symbols: number }> {
+  if (!_db) return [];
+  try {
+    return _db.prepare(`
+      SELECT f.path,
+             COALESCE(f.community, -1) AS community,
+             COALESCE(f.community_label, '') AS label,
+             (SELECT COUNT(*) FROM symbols s WHERE s.file_id = f.id) AS symbols
+      FROM files f WHERE f.project_id = ?
+    `).all(projectId) as Array<{ path: string; community: number; label: string; symbols: number }>;
+  } catch { return []; }
+}
+
+/** G5b: graph outline of a directory — its indexed direct-child files, each
+ *  with community label and top symbols (exported first). Paths in the DB may
+ *  carry either separator (relative() emits backslashes on Windows), so
+ *  matching normalizes both sides rather than using SQL LIKE. */
+export function localDbDirOutline(
+  projectId: string,
+  dirRel: string,
+  maxFiles = 40,
+): Array<{ path: string; community: string; symbols: Array<{ name: string; kind: string }> }> {
+  if (!_db) return [];
+  const norm = (p: string) => p.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
+  const dir = norm(dirRel) === "." ? "" : norm(dirRel);
+  try {
+    const files = _db.prepare(
+      "SELECT id, path, COALESCE(community_label,'') AS label FROM files WHERE project_id = ?",
+    ).all(projectId) as Array<{ id: number; path: string; label: string }>;
+    const kids = files.filter((f) => {
+      const p = norm(f.path);
+      if (dir === "") return !p.includes("/");
+      return p.startsWith(dir + "/") && !p.slice(dir.length + 1).includes("/");
+    }).sort((a, b) => a.path.localeCompare(b.path)).slice(0, maxFiles);
+    const symStmt = _db.prepare(
+      "SELECT name, kind FROM symbols WHERE file_id = ? ORDER BY is_exported DESC, start_line ASC LIMIT 6",
+    );
+    return kids.map((f) => ({
+      path: f.path,
+      community: f.label,
+      symbols: symStmt.all(f.id) as Array<{ name: string; kind: string }>,
+    }));
+  } catch { return []; }
+}
+
+/** Top symbols by incoming references — the system's load-bearing names. */
+export function localDbGodNodes(
+  projectId: string,
+  limit = 8,
+): Array<{ name: string; refs: number; kind: string; file: string; line: number }> {
+  if (!_db) return [];
+  const top = _db.prepare(`
+    SELECT to_sym AS name, COUNT(*) AS refs
+    FROM edges WHERE project_id = ?
+    GROUP BY to_sym ORDER BY refs DESC, to_sym LIMIT ?
+  `).all(projectId, limit) as Array<{ name: string; refs: number }>;
+  const sym = _db.prepare(`
+    SELECT s.kind, f.path AS file, s.start_line AS line
+    FROM symbols s JOIN files f ON f.id = s.file_id
+    WHERE s.project_id = ? AND s.name = ?
+    ORDER BY s.is_exported DESC, s.id LIMIT 1
+  `);
+  const out: Array<{ name: string; refs: number; kind: string; file: string; line: number }> = [];
+  for (const t of top) {
+    const row = sym.get(projectId, t.name) as { kind: string; file: string; line: number } | undefined;
+    if (row) out.push({ ...t, ...row });
+  }
+  return out;
 }
 
 // ─── Semantic search (embedding) ─────────────────────────────────────────────

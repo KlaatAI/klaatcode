@@ -61,11 +61,14 @@ import { configureDiagnostics } from "../tools/diagnostics.js";
 import { setOutputFilterEnabled } from "../tools/output-filter.js";
 import { expandSkill, formatSkillLocation, loadSkills } from "../skills/loader.js";
 import { PhaseTracker } from "../agent/phase-budget.js";
-import { collectCriticalState, checkSummaryCoverage } from "../agent/collapse-check.js";
+import { collectCriticalState, checkSummaryCoverage, buildCumulativeFilesLine } from "../agent/collapse-check.js";
 import { killAllBackground, listBackground } from "../tools/background.js";
-import { KGIndexer, type IndexProgress } from "../tools/kg-indexer.js";
-import { initLocalDb, localDbGetStats } from "../tools/local-db.js";
+import { KGIndexer, enableIncrementalReindex, type IndexProgress } from "../tools/kg-indexer.js";
+import { initLocalDb, localDbGetStats, localDbFileGraph, localDbFileCommunityRows } from "../tools/local-db.js";
+import { renderGraphHtml } from "../tools/graph-html.js";
+import { openBrowser } from "../auth/browser.js";
 import { resolveProjectId } from "../utils/project-id.js";
+import { emit as emitEvent } from "../utils/telemetry.js";
 import { MCPManager, loadMCPConfig, type MCPServerConfig } from "../mcp/client.js";
 import { seedSystemMessages, MODE_PROMPTS } from "../agent/system-prompt.js";
 import { checkForUpdate, isUpdateDismissed } from "../utils/update.js";
@@ -75,6 +78,12 @@ import { COMPACTION_PROMPT, extractSummary, MAX_CONSECUTIVE_COMPACT_FAILURES } f
 import { compactMessagesForApi } from "../agent/compaction.js";
 import { stripStrayTextToolCallArtifacts, maskTextToolXmlForDisplay } from "../agent/text-tool-artifacts.js";
 import { looksLikeUnfulfilledActionPromise } from "../agent/action-promise.js";
+import {
+  loadMemory, buildDistillationMessages, parseDistillation, flattenTranscriptTail,
+  writeProjectMemory, writeUserMemory, clearMemory, DISTILL_EVERY_USER_TURNS,
+  projectMemoryPath, userMemoryPath,
+} from "../agent/memory.js";
+import { buildPersonaGraph } from "../agent/memory-graph.js";
 import { drawWelcomeCard } from "./welcome-card.js";
 import {
   renderSessionMarkdown,
@@ -108,6 +117,7 @@ import { exec, spawnSync } from "child_process";
 import { appendFileSync, readFileSync, writeFileSync, unlinkSync, readdirSync, existsSync, mkdirSync, statSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { homedir, tmpdir } from "node:os";
+import { shellCommand } from "../tools/shell.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -434,8 +444,16 @@ export async function runREPL(
   // ─── Undo tracking — stack of file-path arrays written per AI response ────
   /** Each entry = set of abs paths written during one AI response turn. */
   const undoStack: string[][] = [];
+  /**
+   * Kept index-aligned with undoStack. Lets a later /undo report which turn is being
+   * reverted and how long the edit survived -- a revert inside ~2 minutes is a strong
+   * negative signal about that turn, and one an hour later says almost nothing.
+   */
+  const undoMeta: { at: number; requestId: string | null }[] = [];
   /** Collects writes during the current AI response; committed to undoStack on done. */
   let currentResponseWrites: string[] = [];
+  /** Tool rounds observed in the current turn, for the edit-outcome payload. */
+  let toolRoundsThisTurn = 0;
 
   // ─── Tab mode prompts (Build vs Plan) — inserted after the system seed ────
   const TAB_SYSTEM_PROMPTS: Record<string, string> = MODE_PROMPTS;
@@ -685,7 +703,9 @@ export async function runREPL(
     { cmd: "/hooks",      desc: "List configured lifecycle hooks" },
     { cmd: "/init",       desc: "Analyse project → .klaatai/rules.md" },
     { cmd: "/logout",     desc: "Sign out and clear stored credentials" },
+    { cmd: "/memory",     desc: "What the agent has learned about you (update/clear)" },
     { cmd: "/mcp",        desc: "MCP servers: list / enable / add / disable" },
+    { cmd: "/graph",      desc: "Open the interactive code graph in your browser" },
     { cmd: "/model",      desc: "Pick model: Klaatu or custom third-party API" },
     { cmd: "/paste",      desc: "Attach an image from the clipboard (same as ctrl+v)" },
     { cmd: "/perms",      desc: "Show permission rules" },
@@ -698,7 +718,7 @@ export async function runREPL(
     { cmd: "/sessions",   desc: "List saved sessions" },
     { cmd: "/export",     desc: "Export session to Markdown [path]" },
     { cmd: "/share",      desc: "Alias for /export" },
-    { cmd: "/skill",      desc: "Invoke a saved prompt skill" },
+    { cmd: "/skill",      desc: "List or invoke skills (/<name> works too)" },
     { cmd: "/test",       desc: "Run the project test suite" },
     { cmd: "/verify",     desc: "Proof-of-work: typecheck + tests (/verify auto to set auto-mode)" },
     { cmd: "/theme",      desc: "Show or change the UI theme" },
@@ -708,6 +728,22 @@ export async function runREPL(
     { cmd: "/whoami",     desc: "Logged-in account, plan, backend, version" },
     { cmd: "/why",        desc: "Explain last routing decision" },
   ];
+
+  // Installed skills are slash-invocable (/<name>) — surface them in the
+  // suggestion strip too. Cached per session; /skill new invalidates.
+  let _skillSlashCache: { cmd: string; desc: string }[] | null = null;
+  function skillSlashCommands(): { cmd: string; desc: string }[] {
+    if (_skillSlashCache) return _skillSlashCache;
+    try {
+      _skillSlashCache = loadSkills(skillLoadOptions())
+        .filter(s => !SLASH_COMMANDS.some(c => c.cmd === `/${s.name}`))
+        .map(s => ({
+          cmd: `/${s.name}`,
+          desc: `[skill] ${(s.description ?? "").slice(0, 60) || "invoke this skill"}`,
+        }));
+    } catch { _skillSlashCache = []; }
+    return _skillSlashCache;
+  }
 
   /** Recompute the suggestion strip from the current input value. */
   function updateSlashSuggest(): void {
@@ -719,7 +755,7 @@ export async function runREPL(
     // Only while typing the command token itself: "/", "/mo" — not "/model x".
     if (!v.startsWith("/") || /[\s\n]/.test(v)) { slashSuggest = null; return; }
     const q = v.slice(1);
-    const scored = SLASH_COMMANDS
+    const scored = [...SLASH_COMMANDS, ...skillSlashCommands()]
       .map(c => ({ c, s: q ? fuzzyScore(q, c.cmd.slice(1)) : 0 }))
       .filter(x => x.s >= 0)
       .sort((a, b) => b.s - a.s || a.c.cmd.localeCompare(b.c.cmd))
@@ -1456,7 +1492,8 @@ export async function runREPL(
       }
       const timeout = (typeof entry !== "string" && entry.timeout ? entry.timeout : 5) * 1000;
       try {
-        const res = spawnSync("sh", ["-c", cmd], {
+        const hookSh = shellCommand(cmd);
+        const res = spawnSync(hookSh.exe, hookSh.args, {
           env, input: payload, timeout,
           stdio: ["pipe", "pipe", "pipe"], encoding: "utf-8",
         });
@@ -1867,6 +1904,65 @@ export async function runREPL(
         quit();
         return true;
 
+      case "/memory": {
+        const sub = parts[1]?.toLowerCase();
+        if (sub === "graph") {
+          const mem = loadMemory(projectRoot);
+          if (!mem.project && !mem.user) {
+            pushSystemMsg("No memory yet — nothing to visualize. It builds as you work, or force it with /memory update.");
+            return true;
+          }
+          const proj = resolveProjectId(projectRoot);
+          const data = buildPersonaGraph({
+            projectName: proj?.name ?? "this project",
+            projectMemory: mem.project,
+            userMemory: mem.user,
+          });
+          if (!data) { pushSystemMsg("Memory files are empty — nothing to visualize."); return true; }
+          try {
+            const dir = join(homedir(), ".klaatai", "memory");
+            mkdirSync(dir, { recursive: true });
+            const file = join(dir, "persona-graph.html");
+            writeFileSync(file, renderGraphHtml(data), "utf-8");
+            openBrowser(file);
+            pushSystemMsg(`**Persona graph** — ${data.nodes.length} facts/categories. Opened in your browser. File: ${file}`);
+          } catch (e) {
+            pushSystemMsg(`Could not write persona graph: ${e instanceof Error ? e.message : String(e)}`, "error");
+          }
+          return true;
+        }
+        if (sub === "update") {
+          pushSystemMsg("Distilling this session into memory…");
+          void distillMemory({ silent: false });
+          return true;
+        }
+        if (sub === "clear") {
+          const scope = (parts[2]?.toLowerCase() ?? "all") as "project" | "user" | "all";
+          const valid = ["project", "user", "all"].includes(scope);
+          if (!valid) { pushSystemMsg("Usage: /memory clear [project|user|all]"); return true; }
+          const cleared = clearMemory(projectRoot, scope);
+          pushSystemMsg(cleared.length > 0 ? `Cleared: ${cleared.join(", ")}` : "No memory to clear.");
+          return true;
+        }
+        const mem = loadMemory(projectRoot);
+        if (!mem.project && !mem.user) {
+          pushSystemMsg(
+            "No memory yet — it builds automatically as you work " +
+            `(distilled every ${DISTILL_EVERY_USER_TURNS} turns), or force it now with /memory update.`,
+          );
+          return true;
+        }
+        const lines: string[] = ["**Memory** — injected at session start; new learnings apply next session."];
+        if (mem.project && mem.projectId) {
+          lines.push(`\n**This project** (${projectMemoryPath(mem.projectId)}):\n${mem.project}`);
+        }
+        if (mem.user) lines.push(`\n**You** (${userMemoryPath()}):\n${mem.user}`);
+        lines.push("\n/memory graph — visualize · /memory update — distill now · /memory clear [project|user|all] — forget");
+        pushSystemMsg(lines.join("\n"));
+        return true;
+      }
+
+
       case "/agents": {
         const lines = ["**Agent personas** (for delegate_task):", ""];
         for (const p of Object.values(PERSONAS)) {
@@ -2083,6 +2179,53 @@ export async function runREPL(
           `  Version:  v${APP_VERSION}`,
           `  Network:  ${connState}`,
         ].join("\n"));
+        return true;
+      }
+
+      case "/graph": {
+        // G7: interactive force-directed code graph — exported self-contained
+        // HTML (a terminal can't render this), opened in the default browser.
+        const proj = resolveProjectId(projectRoot);
+        if (!proj) {
+          pushSystemMsg("No project resolved — the code graph needs a git repository.");
+          return true;
+        }
+        const rows = localDbFileCommunityRows(proj.id);
+        if (rows.length === 0) {
+          pushSystemMsg("Code graph not indexed yet — indexing runs in the background after startup; try again in a moment.");
+          return true;
+        }
+        const { edges } = localDbFileGraph(proj.id);
+        const degree = new Map<string, number>();
+        for (const e of edges) {
+          degree.set(e.a, (degree.get(e.a) ?? 0) + 1);
+          degree.set(e.b, (degree.get(e.b) ?? 0) + 1);
+        }
+        const html = renderGraphHtml({
+          projectName: proj.name,
+          nodes: rows.map(r => ({
+            file: r.path,
+            community: r.community,
+            communityLabel: r.label || "unclustered",
+            degree: degree.get(r.path) ?? 0,
+            symbolCount: r.symbols,
+          })),
+          edges,
+        });
+        try {
+          const dir = join(homedir(), ".klaatai", "graph");
+          mkdirSync(dir, { recursive: true });
+          const file = join(dir, `${proj.id.slice(0, 12)}-graph.html`);
+          writeFileSync(file, html, "utf-8");
+          openBrowser(file);
+          const communities = new Set(rows.map(r => r.community)).size;
+          pushSystemMsg(
+            `**Code graph** — ${rows.length} files · ${edges.length} links · ${communities} communities\n` +
+            `Opened in your browser. File: ${file}`,
+          );
+        } catch (e) {
+          pushSystemMsg(`Could not write the graph file: ${e instanceof Error ? e.message : String(e)}`);
+        }
         return true;
       }
 
@@ -2705,9 +2848,10 @@ export async function runREPL(
           const detectedStacks = STACK_MARKERS
             .filter(m => {
               if (m.file.includes("*")) {
+                // Glob in-process — the old `ls … | head` shell-out needed sh.
                 try {
-                  const result = spawnSync("sh", ["-c", `ls ${projectRoot}/${m.file} 2>/dev/null | head -1`], { encoding: "utf-8" });
-                  return (result.stdout ?? "").trim().length > 0;
+                  const suffix = m.file.replace(/^\*/, "").toLowerCase();
+                  return readdirSync(projectRoot).some((e) => e.toLowerCase().endsWith(suffix));
                 } catch { return false; }
               }
               return existsSync(join(projectRoot, m.file));
@@ -2799,6 +2943,25 @@ export async function runREPL(
           });
           if (gitResult.status === 0) {
             undoStack.pop();
+            // The strongest negative label available without content consent: the user
+            // looked at what the model did and threw it away. seconds_after_apply is
+            // what makes it gradable -- the plan treats a revert inside 120s as a
+            // 0.90-confidence FAILURE, while a revert much later is closer to noise.
+            const meta = undoMeta.pop();
+            emitEvent({
+              event_type: "outcome.edit_reverted",
+              // Attributed to the turn that MADE the edit, not the turn that undid it.
+              request_id: meta?.requestId ?? null,
+              session_id: client.sessionId,
+              project_id: _proj?.id ?? null,
+              payload: {
+                file_count: lastWrites.length,
+                seconds_after_apply: meta
+                  ? Math.round((Date.now() - meta.at) / 100) / 10
+                  : null,
+                method: "undo_command",
+              },
+            });
             // Remove from modifiedFiles
             for (const f of lastWrites) {
               const idx = modifiedFiles.findIndex(m => m.path === f || resolve(projectRoot, m.path) === f);
@@ -3319,6 +3482,7 @@ export async function runREPL(
             spawnSync(editor, [skillPath], { stdio: "inherit" });
             app.resume();
             pushSystemMsg(`Skill \`${skillName}\` saved to \`${skillPath}\`.`);
+            _skillSlashCache = null; // new skill joins the / suggestions now
             return true;
           }
 
@@ -3332,7 +3496,8 @@ export async function runREPL(
             return true;
           }
           pushSystemMsg(`Invoking skill **${match.name}**${skillArgs ? ` with \`${skillArgs}\`` : ""}…`);
-          void sendMessage(expandSkill(match, skillArgs));
+          // Transcript shows the compact command; only the MODEL gets the playbook.
+          void sendMessage(cmd.trim(), { modelText: expandSkill(match, skillArgs) });
           return true;
         }
 
@@ -3383,7 +3548,8 @@ export async function runREPL(
           const skill = loadSkills(skillLoadOptions()).find(s => s.name === name);
           if (skill) {
             pushSystemMsg(`Invoking skill **${skill.name}**${rest ? ` with \`${rest}\`` : ""}…`);
-            void sendMessage(expandSkill(skill, rest));
+            // Transcript shows the compact command; only the MODEL gets the playbook.
+            void sendMessage(cmd.trim(), { modelText: expandSkill(skill, rest) });
             return true;
           }
         }
@@ -3400,7 +3566,8 @@ export async function runREPL(
     const cmd = text.slice(1).trim();
     if (!cmd) return false;
 
-    const result = spawnSync("sh", ["-c", cmd], {
+    const injSh = shellCommand(cmd);
+    const result = spawnSync(injSh.exe, injSh.args, {
       cwd:      projectRoot,
       encoding: "utf-8",
       timeout:  15_000,
@@ -3434,19 +3601,30 @@ export async function runREPL(
     return true;
   }
 
-  async function sendMessage(text: string, opts: { noTools?: boolean } = {}): Promise<void> {
+  // When the previous user turn settled, and how many files it touched. Drives the
+  // follow-up outcome signal — see the emit in sendMessage.
+  let _lastTurnEndedAt = 0;
+  let _lastTurnEditedFiles = 0;
+
+  async function sendMessage(text: string, opts: { noTools?: boolean; modelText?: string } = {}): Promise<void> {
     if (!text.trim()) return;
     const turnT0 = Date.now();
     let turnWroteFiles = false; // gates the proof-of-work auto-verify (function scope)
     const turnEditedFiles = new Set<string>(); // relative paths edited this turn
 
-    // ── ! shell injection ─────────────────────────────────────────────────
-    if (text.trimStart().startsWith("!")) {
-      if (runShellInjection(text.trimStart())) return;
-    }
+    // modelText: the transcript shows `text` (e.g. "/caveman lite") while the
+    // MODEL receives this expanded content (e.g. the 4K skill playbook). Set
+    // only by skill invocation, which already ran the slash handler — so the
+    // early command handling below must not re-intercept the display text.
+    if (!opts.modelText) {
+      // ── ! shell injection ───────────────────────────────────────────────
+      if (text.trimStart().startsWith("!")) {
+        if (runShellInjection(text.trimStart())) return;
+      }
 
-    if (text.startsWith("/")) {
-      if (handleSlashCommand(text)) return;
+      if (text.startsWith("/")) {
+        if (handleSlashCommand(text)) return;
+      }
     }
 
     if (history[0] !== text.trim()) {
@@ -3454,11 +3632,43 @@ export async function runREPL(
     }
     field.historyReset();
 
+    // ── Layer 1: new user turn ────────────────────────────────────────────
+    // Mint the join key BEFORE the first request so the routing decision, every
+    // dispatch, and any later outcome all share one request_id. Slash commands
+    // and shell injections have already returned above, so this only fires for
+    // real model turns.
+    const priorRequestId = client.requestId;
+    const priorEndedAt = _lastTurnEndedAt;
+    const requestId = client.beginUserTurn();
+    toolRoundsThisTurn = 0;
+
+    // A quick follow-up is the strongest outcome signal available without content
+    // consent: the user is asking again because the last answer did not land.
+    // Timing only -- semantic_similarity would need embeddings, which are out of
+    // scope, so classification is deliberately left to the derivation job.
+    if (priorRequestId && priorEndedAt) {
+      const secondsSince = (Date.now() - priorEndedAt) / 1000;
+      if (secondsSince < 600) {
+        emitEvent({
+          event_type: "outcome.followup_submitted",
+          request_id: requestId,
+          session_id: client.sessionId,
+          project_id: _proj?.id ?? null,
+          payload: {
+            prior_request_id: priorRequestId,
+            seconds_since: Math.round(secondsSince * 10) / 10,
+            prior_turn_edited_files: _lastTurnEditedFiles,
+          },
+        });
+      }
+    }
+
     // ── Resolve @ file references ──────────────────────────────────────
     // Replace @path tokens with inline file contents for context injection.
     // Pattern: @ followed by a non-space path (supports relative/absolute)
-    let resolvedText = text;
-    const atRefs = text.match(/@([\w./\\-]+)/g);
+    const modelBase = opts.modelText ?? text;
+    let resolvedText = modelBase;
+    const atRefs = modelBase.match(/@([\w./\\-]+)/g);
     if (atRefs) {
       const injections: string[] = [];
       for (const ref of atRefs) {
@@ -3473,7 +3683,7 @@ export async function runREPL(
         }
       }
       if (injections.length > 0) {
-        resolvedText = text + "\n\n" + injections.join("\n\n");
+        resolvedText = modelBase + "\n\n" + injections.join("\n\n");
       }
     }
 
@@ -3968,6 +4178,10 @@ export async function runREPL(
           }));
           for (const ph of placeholders) messages.push(ph);
           runningToolCount += batch.length;
+          // One round = one batch, however many tools it contained. Matches the
+          // server-side tool_round_count in api/telemetry.py, which counts role="tool"
+          // groups rather than individual calls.
+          toolRoundsThisTurn++;
           chatLinesDirty = true;
           app.requestRender();
 
@@ -4262,8 +4476,26 @@ export async function runREPL(
         if (currentResponseWrites.length > 0) {
           turnWroteFiles = true;
           undoStack.push([...currentResponseWrites]);
+          // Metadata kept in lockstep with undoStack so a later /undo knows WHICH
+          // turn it is reverting and how long the edit stood. Parallel array rather
+          // than a richer undoStack element, to avoid touching the revert path's
+          // git-checkout logic.
+          undoMeta.push({ at: Date.now(), requestId: client.requestId });
           // Keep at most 20 undo levels
           if (undoStack.length > 20) undoStack.shift();
+          if (undoMeta.length > 20) undoMeta.shift();
+          // The model's edit landed on disk. Positive on its own, but the label that
+          // matters is whether it SURVIVES -- see outcome.edit_reverted in /undo.
+          emitEvent({
+            event_type: "outcome.edit_applied",
+            request_id: client.requestId,
+            session_id: client.sessionId,
+            project_id: _proj?.id ?? null,
+            payload: {
+              file_count: currentResponseWrites.length,
+              tool_rounds: toolRoundsThisTurn,
+            },
+          });
           currentResponseWrites = [];
         }
 
@@ -4319,6 +4551,12 @@ export async function runREPL(
     // Long turn finished — ping the terminal so a tabbed-away user knows.
     if (Date.now() - turnT0 > 15_000) notifyTerminal("Klaat Code — task finished");
 
+    // Layer 1: when this turn settled, so the next turn can measure how quickly
+    // the user came back. Recorded here rather than at the stream's end because a
+    // turn is not really over until its tool rounds have finished.
+    _lastTurnEndedAt = Date.now();
+    _lastTurnEditedFiles = turnEditedFiles.size;
+
     // Proof-of-work: if this turn edited files and auto-verify is enabled,
     // prove the change compiles/passes. Skipped when more input is queued
     // (the task isn't settled yet) or when interrupted.
@@ -4327,8 +4565,61 @@ export async function runREPL(
       await runVerify(verifyMode === "full" ? "full" : "types", { auto: true, editedFiles: [...turnEditedFiles] });
     }
 
+    // M1: every few settled turns, distill what this session teaches about
+    // the user/project into ~/.klaatai/memory/ — background, fire-and-forget,
+    // read into the prompt at the NEXT session start (never this one).
+    _userTurnsSinceDistill++;
+    if (_userTurnsSinceDistill >= DISTILL_EVERY_USER_TURNS && !interrupted) {
+      void distillMemory({ silent: true });
+    }
+
     // Input queued after the last round boundary runs now, in order.
     drainQueue();
+  }
+
+  // ─── M1: cross-session memory distillation ────────────────────────────────
+
+  let _userTurnsSinceDistill = 0;
+  let _distillInFlight = false;
+
+  async function distillMemory(opts: { silent: boolean }): Promise<void> {
+    if (_distillInFlight) return;
+    const proj = resolveProjectId(projectRoot);
+    if (!proj) { if (!opts.silent) pushSystemMsg("Memory needs a resolvable project (git remote)."); return; }
+    _distillInFlight = true;
+    _userTurnsSinceDistill = 0;
+    try {
+      const mem = loadMemory(projectRoot);
+      const transcriptTail = flattenTranscriptTail(apiMessages);
+      if (!transcriptTail) return;
+      const req = buildDistillationMessages({
+        existingProject: mem.project,
+        existingUser: mem.user,
+        transcriptTail,
+        modifiedFiles: modifiedFiles.map(f => f.path),
+      });
+      let text = "";
+      // fast tier: the payload is small and the output is a short markdown
+      // file — this must stay a sub-cent background call.
+      const stream = client.chatStream(req as Message[], { tier: "fast", task: "summarize" });
+      for await (const chunk of stream) {
+        if (chunk.type === "error") throw new Error(chunk.error ?? "stream error");
+        if (chunk.type === "token") text += chunk.text ?? "";
+      }
+      const parsed = parseDistillation(text);
+      if (!parsed) { if (!opts.silent) pushSystemMsg("Memory update failed: malformed distiller output.", "error"); return; }
+      writeProjectMemory(proj.id, parsed.project);
+      writeUserMemory(parsed.user);
+      ledger.note("memory distilled");
+      if (!opts.silent) {
+        pushSystemMsg(`Memory updated — ${parsed.project.split("\n").filter(Boolean).length} project line(s), ${parsed.user.split("\n").filter(Boolean).length} user line(s). Loads at next session start. /memory to view.`);
+      }
+    } catch (e) {
+      // Background learning must never surface as an error mid-work.
+      if (!opts.silent) pushSystemMsg(`Memory update failed: ${e instanceof Error ? e.message : String(e)}`, "error");
+    } finally {
+      _distillInFlight = false;
+    }
   }
 
   // ─── Context compaction ───────────────────────────────────────────────────
@@ -4345,12 +4636,19 @@ export async function runREPL(
     let seedEnd = 0;
     while (seedEnd < apiMessages.length && apiMessages[seedEnd]!.role === "system") seedEnd++;
     const systemSeed  = apiMessages.slice(0, seedEnd);
-    const toSummarise = apiMessages.slice(seedEnd, -4);
+    // M3: the cut point must never separate a tool result from its tool call.
+    // A blind last-4 keep can start the retained tail with tool messages whose
+    // assistant call got summarized away — providers reject the orphaned pair.
+    // Pull the boundary back onto the assistant message that made those calls.
+    let cut = Math.max(seedEnd, apiMessages.length - 4);
+    while (cut > seedEnd && apiMessages[cut]!.role === "tool") cut--;
+    const toSummarise = apiMessages.slice(seedEnd, cut);
     if (toSummarise.length === 0) return;
     // Flatten to plain text: the slice can cut assistant/tool pairings, and
     // orphaned tool messages make providers reject the whole request (which
     // surfaced as "empty compaction summary"). The summary doesn't need tool
-    // structure — just the content.
+    // structure — just the content. Per-message caps keep one oversized turn
+    // (a giant paste or tool dump) from eating the whole summary request.
     const flattened: Message[] = toSummarise.map(m => {
       if (m.role === "tool") {
         const c = typeof m.content === "string" ? m.content : "";
@@ -4359,7 +4657,10 @@ export async function runREPL(
       if (m.role === "assistant" && m.tool_calls?.length) {
         const calls = m.tool_calls.map(t => t.function.name).join(", ");
         const c = typeof m.content === "string" ? m.content : "";
-        return { role: "assistant" as const, content: `${c}\n[called tools: ${calls}]`.trim() };
+        return { role: "assistant" as const, content: `${c.slice(0, 4_000)}\n[called tools: ${calls}]`.trim() };
+      }
+      if (typeof m.content === "string" && m.content.length > 8_000) {
+        return { ...m, content: m.content.slice(0, 8_000) + "\n[… trimmed for summarization]" };
       }
       return m;
     });
@@ -4424,8 +4725,14 @@ export async function runREPL(
       compactionCount++;
       ctxProcessedSinceCompact = 0; // checkpoint — churn counter restarts
 
-      // Replace apiMessages: [system seed, summary stub, last 4]
-      const last4  = apiMessages.slice(-4);
+      // M3: cumulative file-op tracking — the new stub carries forward the
+      // file list from any prior stub, so after N compactions the model still
+      // knows every file it touched all session.
+      const cumulativeLine = buildCumulativeFilesLine(toSummarise, modifiedFiles.map(f => f.path));
+
+      // Replace apiMessages: [system seed, summary stub, kept tail]
+      // (tail boundary was healed above — it never starts with a tool result)
+      const keptTail = apiMessages.slice(cut);
       apiMessages  = [
         ...systemSeed,
         {
@@ -4433,10 +4740,11 @@ export async function runREPL(
           content:
             `[Context compacted — structured summary of earlier conversation below. ` +
             `Resume the task without acknowledging this summary.]\n${summary}\n` +
+            (cumulativeLine ? `${cumulativeLine}\n` : "") +
             `(Earlier details recoverable: read_file ${ledger.path})` +
             recoveryNote,
         },
-        ...last4,
+        ...keptTail,
       ];
 
       const noticeMsg: ChatMessage = {
@@ -5515,6 +5823,12 @@ export async function runREPL(
   // ─── Register key handlers ─────────────────────────────────────────────────
 
   unsubscribers.push(app.onKey("ctrl+c", () => quit()));
+  // Ctrl+L: full repaint — the recovery key for any screen corruption the
+  // renderer can't see (stray stdout writes, terminal glitches).
+  unsubscribers.push(app.onKey("ctrl+l", () => {
+    chatLinesDirty = true;
+    app.forceRedraw();
+  }));
   unsubscribers.push(app.onKey("ctrl+b", () => {
     const current = sidebarOverride !== null ? sidebarOverride : true;
     sidebarOverride = !current;
@@ -5953,7 +6267,36 @@ export async function runREPL(
     verifyRunning = false;
 
     const { line, allOk } = summarizeChecks(results);
+
+    // Layer 1: execution outcome -- the strongest label class there is. Everything
+    // else in the log describes what we DID; this says whether it worked.
+    const emitVerifyOutcome = (introducedCount: number, preExistingCount: number): void => {
+      emitEvent({
+        event_type: scope === "full" ? "outcome.tests_run" : "outcome.build_run",
+        request_id: client.requestId,
+        session_id: client.sessionId,
+        project_id: _proj?.id ?? null,
+        payload: {
+          scope,
+          runners: toRun.map((c) => c.runner),
+          passed: allOk,
+          checks_total: results.length,
+          checks_failed: results.filter((r) => !r.ok).length,
+          // The distinction that makes this a usable label: a project that was
+          // already red must never read as "the model broke it". Only
+          // introduced_failures is evidence about THIS turn.
+          introduced_failures: introducedCount,
+          pre_existing_failures: preExistingCount,
+          // auto = the proof-of-work path after a turn that wrote files. A
+          // user-invoked /verify is a weaker signal about that turn.
+          auto: Boolean(opts.auto),
+          edited_file_count: opts.editedFiles?.length ?? 0,
+        },
+      });
+    };
+
     if (allOk) {
+      emitVerifyOutcome(0, 0);
       pushSystemMsg(`✓ **Verified** — ${line}`);
       chatLinesDirty = true; app.requestRender();
       return;
@@ -5970,6 +6313,7 @@ export async function runREPL(
       .map(f => f.replace(/\\/g, "/").replace(/^\.\//, ""));
     const failingFiles = extractFailingFiles(results);
     const introduced = changed.filter(c => [...failingFiles].some(f => f === c || f.endsWith("/" + c) || c.endsWith("/" + f)));
+    emitVerifyOutcome(introduced.length, Math.max(0, failingFiles.size - introduced.length));
 
     // Failures, but none in code the agent changed → pre-existing. Don't dump
     // the wall of errors or blame the agent; just note it.
@@ -6610,6 +6954,9 @@ export async function runREPL(
   if (_proj) client.setProjectId(_proj.id);
 
   const _kgIndexer = new KGIndexer(client);
+  // G3: agent edits reindex their files within seconds — a stale graph teaches
+  // the model (and the user) that graph-first is a tax, not a shortcut.
+  enableIncrementalReindex(_kgIndexer, projectRoot);
   const refreshGraphStats = (indexing: boolean, p?: IndexProgress) => {
     const s = _proj ? localDbGetStats(_proj.id) : null;
     graphStats = {

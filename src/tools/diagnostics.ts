@@ -60,9 +60,16 @@ export function resolveDiagnosticsCommand(
   const localBin = deps.hasLocalBin ?? hasLocalBin;
   const ext = extname(absPath).toLowerCase();
 
-  // Explicit config override wins.
+  // Explicit config override wins. Overrides are shell one-liners; `sh` does
+  // not exist on a stock Windows box, so use cmd there (override syntax is
+  // platform-native, same contract as npm scripts).
   const override = cfg.commands?.[ext];
-  if (override) return ["sh", "-c", override.replace(/\{file\}/g, JSON.stringify(absPath))];
+  if (override) {
+    const expanded = override.replace(/\{file\}/g, JSON.stringify(absPath));
+    return process.platform === "win32"
+      ? ["cmd", "/d", "/s", "/c", expanded]
+      : ["sh", "-c", expanded];
+  }
 
   if ([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"].includes(ext)) {
     // Prefer a locally-installed linter (fast, per-file). Never npx-install.
