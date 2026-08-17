@@ -283,7 +283,7 @@ Three-layer model — safe read-only tools run silently; everything else asks:
 
 Full MCP client, both transports:
 
-- **stdio** — local servers, configured in `.klaatai/mcp.json`, built-in presets (filesystem, GitHub, Postgres, Puppeteer, Brave Search, Fetch, Agent Memory, …)
+- **stdio** — local servers, configured in `.klaatai/mcp.json`, built-in presets (filesystem, GitHub, Git, Postgres, SQLite, Puppeteer, Brave Search, Agent Memory)
 - **Streamable HTTP** — remote servers via `"url"` config or `/mcp add <url>`; SSE and JSON responses, session management, and **OAuth 2.1** (discovery + dynamic client registration + PKCE browser flow) when the server requires auth — tokens cached in `~/.klaatai/mcp-oauth.json`
 
 Manage live with `/mcp`.
