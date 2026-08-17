@@ -44,6 +44,16 @@ import {
   type MCPLoadOptions,
 } from "./import.js";
 
+const REQUEST_TIMEOUT_MS = 30_000;
+
+/**
+ * The handshake gets a longer budget than ordinary calls: presets spawn via
+ * `npx -y`, so the very first connect on a machine pays for an npm download
+ * before the server can answer anything. At 30s that reads as a broken
+ * server on first run and only works after a manual reconnect.
+ */
+const INIT_TIMEOUT_MS = 120_000;
+
 // ─── Config ───────────────────────────────────────────────────────────────────
 
 export interface MCPServerConfig {
@@ -480,7 +490,7 @@ export class MCPServerClient {
           this._pending.delete(id);
           reject(new Error(`MCP request timed out: ${method}`));
         }
-      }, 30_000);
+      }, method === "initialize" ? INIT_TIMEOUT_MS : REQUEST_TIMEOUT_MS);
       this._pending.set(id, { resolve, reject, timer });
       this._write({ jsonrpc: "2.0", id, method, params } satisfies JsonRpcRequest);
     });
