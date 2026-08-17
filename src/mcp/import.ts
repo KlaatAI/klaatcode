@@ -58,6 +58,34 @@ function expandStringArray(values: string[] | undefined, ctx: ExpandContext): st
   return values.map(v => expandMcpEnvRefs(v, ctx));
 }
 
+/**
+ * Expand `${VAR}` refs in a native `.klaatai/mcp.json` entry.
+ *
+ * Native configs go through the same expansion as imported ones. Without
+ * it a server published for the wider MCP ecosystem — where `${VAR:-default}`
+ * is the norm, since Claude Code and Cursor both expand it — would receive
+ * the literal placeholder as its env value, silently ignoring whatever the
+ * user actually set in their shell.
+ */
+export function expandNativeMcpServer(
+  cfg: MCPServerConfig,
+  ctx: ExpandContext,
+): MCPServerConfig {
+  const url = cfg.url ? expandMcpEnvRefs(cfg.url, ctx) : undefined;
+  const command = cfg.command ? expandMcpEnvRefs(cfg.command, ctx) : undefined;
+  const args = expandStringArray(cfg.args, ctx);
+  const env = expandStringRecord(cfg.env, ctx);
+  const headers = expandStringRecord(cfg.headers, ctx);
+  return {
+    ...cfg,
+    ...(url ? { url } : {}),
+    ...(command ? { command } : {}),
+    ...(args ? { args } : {}),
+    ...(env ? { env } : {}),
+    ...(headers ? { headers } : {}),
+  };
+}
+
 /** Map an external mcpServers entry to KlaatCode's MCPServerConfig. */
 export function mapExternalMcpServer(
   entry: Record<string, unknown>,
@@ -146,6 +174,7 @@ function mergeNativeServers(
   merged: Record<string, MCPServerEntry>,
   servers: Record<string, MCPServerConfig>,
   sourceLabel: string,
+  ctx: ExpandContext,
   onLog?: (msg: string) => void,
 ): void {
   for (const [name, cfg] of Object.entries(servers)) {
@@ -153,7 +182,7 @@ function mergeNativeServers(
     if (existing?.source && existing.source !== sourceLabel) {
       onLog?.(`mcp: skipped "${name}" from ${existing.source} (overridden by ${sourceLabel})`);
     }
-    merged[name] = { ...cfg, source: sourceLabel };
+    merged[name] = { ...expandNativeMcpServer(cfg, ctx), source: sourceLabel };
   }
 }
 
@@ -195,6 +224,7 @@ export function mergeNativeMcpConfig(
   homeDir: string,
   onLog?: (msg: string) => void,
 ): void {
+  const ctx: ExpandContext = { projectRoot, homeDir, env: process.env };
   const nativePaths: Array<{ path: string; label: string }> = [
     { path: join(homeDir, ".klaatai", "mcp.json"), label: "~/.klaatai/mcp.json" },
     { path: join(projectRoot, ".klaatai", "mcp.json"), label: ".klaatai/mcp.json" },
@@ -209,6 +239,7 @@ export function mergeNativeMcpConfig(
       merged,
       servers as Record<string, MCPServerConfig>,
       label,
+      ctx,
       onLog,
     );
   }

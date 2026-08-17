@@ -149,6 +149,41 @@ describe("loadMCPConfig imports", () => {
     expect(logs.some(l => l.includes('overridden by .klaatai/mcp.json'))).toBe(true);
   });
 
+  test("expands ${VAR} refs in native config, same as imports", () => {
+    mkdirSync(join(projectRoot, ".klaatai"), { recursive: true });
+    writeFileSync(join(projectRoot, ".klaatai", "mcp.json"), JSON.stringify({
+      servers: {
+        memory: {
+          command: "npx",
+          args: ["-y", "@agentmemory/mcp"],
+          env: {
+            AGENTMEMORY_URL: "${AGENTMEMORY_URL:-http://localhost:3111}",
+            AGENTMEMORY_SECRET: "${AGENTMEMORY_SECRET:-}",
+          },
+        },
+      },
+    }));
+
+    const before = process.env["AGENTMEMORY_URL"];
+    try {
+      delete process.env["AGENTMEMORY_URL"];
+      const fallback = loadMCPConfig(projectRoot, { homeDir });
+      expect(fallback.servers["memory"]?.env?.["AGENTMEMORY_URL"])
+        .toBe("http://localhost:3111");
+      expect(fallback.servers["memory"]?.env?.["AGENTMEMORY_SECRET"]).toBe("");
+
+      // A value set in the user's shell must win over the default rather
+      // than being swallowed by an unexpanded placeholder.
+      process.env["AGENTMEMORY_URL"] = "http://memserver.internal:9999";
+      const custom = loadMCPConfig(projectRoot, { homeDir });
+      expect(custom.servers["memory"]?.env?.["AGENTMEMORY_URL"])
+        .toBe("http://memserver.internal:9999");
+    } finally {
+      if (before === undefined) delete process.env["AGENTMEMORY_URL"];
+      else process.env["AGENTMEMORY_URL"] = before;
+    }
+  });
+
   test("importMcpConfigs: false skips external files", () => {
     writeFileSync(join(projectRoot, ".mcp.json"), JSON.stringify({
       mcpServers: { imported: { command: "imported-cmd" } },
