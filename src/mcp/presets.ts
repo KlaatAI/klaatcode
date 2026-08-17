@@ -100,6 +100,17 @@ export const MCP_PRESETS: MCPPreset[] = [
       description: "SQLite access via MCP",
     },
   },
+  {
+    id:          "agentmemory",
+    name:        "Agent Memory",
+    description: "Persistent memory across sessions — recall past decisions, conventions, and debugging findings",
+    envVars:     ["AGENTMEMORY_URL", "AGENTMEMORY_SECRET"],
+    config: {
+      command:     "npx",
+      args:        ["-y", "@agentmemory/mcp"],
+      description: "Persistent agent memory via MCP — needs a local server (npx @agentmemory/agentmemory start); AGENTMEMORY_URL defaults to http://localhost:3111",
+    },
+  },
 ];
 
 /** Look up a preset by id (case-insensitive). */
