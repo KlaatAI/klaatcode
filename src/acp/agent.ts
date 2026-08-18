@@ -34,7 +34,8 @@ import { seedSystemMessages } from "../agent/system-prompt.js";
 import { stripStrayTextToolCallArtifacts } from "../agent/text-tool-artifacts.js";
 import {
   checkPermission, loadPermissions, persistAlwaysAllow, SAFE_TOOLS,
-  type PermDecision, type PermissionsFile,
+  loadClaudeCompatRules,
+  type PermDecision, type PermissionsFile, type CompiledRules,
 } from "../permissions/index.js";
 import { resolveProjectId } from "../utils/project-id.js";
 import { loadConfig } from "../auth/credentials.js";
@@ -232,7 +233,7 @@ export class AcpAgent {
 
   private async runTool(
     sessionId: string, projectRoot: string, client: KlaatAIClient, tc: ToolCall,
-    perms: PermissionsFile, sessionApproved: Set<string>,
+    perms: PermissionsFile, sessionApproved: Set<string>, claudeCompatRules: CompiledRules | null,
   ): Promise<string> {
     const name = tc.function.name;
     let args: Record<string, unknown> = {};
@@ -247,7 +248,7 @@ export class AcpAgent {
 
     const isSafe = SAFE_TOOLS.has(name) || name === "todo_write";
     if (!isSafe && !sessionApproved.has(name)) {
-      const check = checkPermission(tc, perms);
+      const check = checkPermission(tc, perms, claudeCompatRules);
       if (check === "deny") {
         this.notifyUpdate(sessionId, { sessionUpdate: "tool_call_update", toolCallId: tc.id, status: "failed", content: [textContent("Permission denied (matched a deny rule).")] });
         return "Error: Permission denied (matched deny rule).";
@@ -299,6 +300,9 @@ export class AcpAgent {
     const perms = loadPermissions();
     const sessionApproved = new Set<string>();
     const config = loadConfig();
+    const claudeCompatRules = config.compat?.importClaudeSettings !== false
+      ? loadClaudeCompatRules(state.projectRoot)
+      : null;
     const maxTurns = 60; // editor sessions run longer than a single bench task
     let turns = 0;
     let loopRefusals = 0;
@@ -365,7 +369,7 @@ export class AcpAgent {
 
         for (const tc of pendingToolCalls) {
           if (state.cancelled) return { stopReason: "cancelled" as StopReason };
-          const result = await this.runTool(params.sessionId, state.projectRoot, client, tc, perms, sessionApproved);
+          const result = await this.runTool(params.sessionId, state.projectRoot, client, tc, perms, sessionApproved, claudeCompatRules);
           state.messages.push({ role: "tool", content: result.slice(0, 20_000), tool_call_id: tc.id });
         }
         continue;

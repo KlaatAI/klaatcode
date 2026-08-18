@@ -82,9 +82,10 @@ export interface Config {
     importClaudeSkills?: boolean;
     /** Import MCP servers from .mcp.json / .claude.json / .cursor/mcp.json (default: true). */
     importMcpConfigs?: boolean;
+    /** Honor permissions.allow/deny/ask from .claude/settings.json (default: true). */
+    importClaudeSettings?: boolean;
   };
 }
-
 export interface CustomModelConfig {
   /** Display name used to select it: /model <name>. */
   name: string;
