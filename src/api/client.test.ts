@@ -143,30 +143,24 @@ test("chatStream: unreachable host yields an error chunk instead of throwing", a
   }
 });
 
-test("getUsageStats: reads plan from quota headers", async () => {
-  const realFetch = globalThis.fetch;
-  globalThis.fetch = (async () => new Response(JSON.stringify({
+test("mergeUsagePlan: reads plan from quota headers", () => {
+  const data = {
     total_requests: 3,
     prompt_tokens: 10,
     completion_tokens: 5,
     total_tokens: 15,
     total_cost_usd: 0.01,
     by_tier: {},
-  }), {
-    status: 200,
-    headers: { "X-KlaatAI-Quota-Plan": "pro" },
-  })) as typeof fetch;
-  try {
-    const stats = await new KlaatAIClient({ apiKey: "test" }).getUsageStats();
-    expect(stats?.plan).toBe("pro");
-  } finally {
-    globalThis.fetch = realFetch;
-  }
+  };
+  const stats = KlaatAIClient.mergeUsagePlan(
+    new Headers({ "X-KlaatAI-Quota-Plan": "pro" }),
+    data,
+  );
+  expect(stats.plan).toBe("pro");
 });
 
-test("getUsageStats: reads plan from JSON body when headers omit it", async () => {
-  const realFetch = globalThis.fetch;
-  globalThis.fetch = (async () => new Response(JSON.stringify({
+test("mergeUsagePlan: reads plan from JSON body when headers omit it", () => {
+  const stats = KlaatAIClient.mergeUsagePlan(new Headers(), {
     total_requests: 1,
     prompt_tokens: 0,
     completion_tokens: 0,
@@ -174,11 +168,22 @@ test("getUsageStats: reads plan from JSON body when headers omit it", async () =
     total_cost_usd: 0,
     by_tier: {},
     plan: "free",
-  }), { status: 200 })) as typeof fetch;
-  try {
-    const stats = await new KlaatAIClient({ apiKey: "test" }).getUsageStats();
-    expect(stats?.plan).toBe("free");
-  } finally {
-    globalThis.fetch = realFetch;
-  }
+  });
+  expect(stats.plan).toBe("free");
+});
+
+test("mergeUsagePlan: header plan wins over JSON body", () => {
+  const stats = KlaatAIClient.mergeUsagePlan(
+    new Headers({ "X-KlaatAI-Quota-Plan": "pro" }),
+    {
+      total_requests: 1,
+      prompt_tokens: 0,
+      completion_tokens: 0,
+      total_tokens: 0,
+      total_cost_usd: 0,
+      by_tier: {},
+      plan: "free",
+    },
+  );
+  expect(stats.plan).toBe("pro");
 });
