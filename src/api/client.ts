@@ -109,6 +109,8 @@ export interface LifetimeUsageStats {
   total_tokens: number;
   total_cost_usd: number;
   by_tier: Record<string, TierUsage>;
+  /** Subscription plan when the backend exposes it on /v1/me/usage. */
+  plan?: string;
 }
 
 export interface ClientOptions {
@@ -532,7 +534,10 @@ export class KlaatAIClient {
         res = await fetch(`${this.baseUrl}/v1/me/usage`, { headers: this.headers() });
       }
       if (!res.ok) return null;
-      return res.json() as Promise<LifetimeUsageStats>;
+      const quota = KlaatAIClient.parseQuotaHeaders(res.headers);
+      const data = await res.json() as LifetimeUsageStats & { plan?: string };
+      const plan = quota?.plan ?? data.plan;
+      return plan ? { ...data, plan } : data;
     } catch {
       return null;
     }
