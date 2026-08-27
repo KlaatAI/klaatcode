@@ -78,6 +78,7 @@ import { COMPACTION_PROMPT, extractSummary, MAX_CONSECUTIVE_COMPACT_FAILURES } f
 import { compactMessagesForApi } from "../agent/compaction.js";
 import { stripStrayTextToolCallArtifacts, maskTextToolXmlForDisplay } from "../agent/text-tool-artifacts.js";
 import { looksLikeUnfulfilledActionPromise } from "../agent/action-promise.js";
+import { isToolFailure, TOOL_FAILURE_FOCUS_HINT } from "../agent/tool-failure-focus.js";
 import {
   loadMemory, buildDistillationMessages, parseDistillation, flattenTranscriptTail,
   writeProjectMemory, writeUserMemory, clearMemory, DISTILL_EVERY_USER_TURNS,
@@ -4155,6 +4156,7 @@ export async function runREPL(
             SAFE_TOOLS.has(t.function.name) ||
             (t.function.name === "delegate_task" && getPersona(parseDelegateArgs(t).agent).readonly);
           const batches: ToolCall[][] = [];
+          let roundHadToolFailure = false;
           for (const tc of pendingToolCalls) {
             const last = batches[batches.length - 1];
             if (isBatchable(tc) && last && isBatchable(last[0]!)) {
@@ -4207,6 +4209,7 @@ export async function runREPL(
           for (let bi = 0; bi < batch.length; bi++) {
             const tc = batch[bi]!;
             const toolResult = batchResults[bi]!;
+            if (isToolFailure(toolResult)) roundHadToolFailure = true;
             const toolLines = toolResult.split("\n").length;
             const editDiff = toolResult.startsWith("Error") ? undefined : diffForTool(tc);
             const toolMsg = placeholders[bi]!;
@@ -4320,6 +4323,17 @@ export async function runREPL(
             ];
             app.requestRender();
           }
+          }
+          if (roundHadToolFailure) {
+            currentApiMessages = [
+              ...currentApiMessages,
+              { role: "system", content: TOOL_FAILURE_FOCUS_HINT },
+            ];
+            messages.push({
+              role: "system",
+              content: "↻ Tool failure — focus reminder injected.",
+            });
+            chatLinesDirty = true;
           }
           if (interrupted) break outerLoop;
           // 9.5: reclassify the agent phase from this round's tools.

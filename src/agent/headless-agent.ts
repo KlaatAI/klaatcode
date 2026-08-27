@@ -14,6 +14,7 @@ import { KlaatAIClient, type Message, type ToolCall, type ToolDefinition } from 
 import { executeTools, TOOL_DEFINITIONS } from "../tools/index.js";
 import { compactMessagesForApi } from "./compaction.js";
 import { costUsd } from "../pricing.js";
+import { isToolFailure, TOOL_FAILURE_FOCUS_HINT } from "./tool-failure-focus.js";
 
 export interface HeadlessResult {
   finalText: string;
@@ -166,11 +167,16 @@ export async function runHeadlessAgent(
         }
         loopRefusals = 0;
 
+        let roundHadToolFailure = false;
         for (const tc of pendingToolCalls) {
           const out = await executeTools(tc, projectRoot, client);
           res.toolCalls += 1;
           opts.onProgress?.({ kind: "tool", detail: tc.function.name });
+          if (isToolFailure(out)) roundHadToolFailure = true;
           apiMessages = [...apiMessages, { role: "tool", content: out.slice(0, 20_000), tool_call_id: tc.id }];
+        }
+        if (roundHadToolFailure) {
+          apiMessages = [...apiMessages, { role: "system", content: TOOL_FAILURE_FOCUS_HINT }];
         }
         continue;
       }
