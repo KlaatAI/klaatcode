@@ -32,6 +32,7 @@ import { initLocalDb } from "../tools/local-db.js";
 import { compactMessagesForApi } from "../agent/compaction.js";
 import { seedSystemMessages } from "../agent/system-prompt.js";
 import { stripStrayTextToolCallArtifacts } from "../agent/text-tool-artifacts.js";
+import { isToolFailure, TOOL_FAILURE_FOCUS_HINT } from "../agent/tool-failure-focus.js";
 import {
   checkPermission, loadPermissions, persistAlwaysAllow, SAFE_TOOLS,
   type PermDecision, type PermissionsFile,
@@ -270,7 +271,7 @@ export class AcpAgent {
     // one, apply_patch can touch several — that one falls back to text).
     const oldText = kind === "edit" && name !== "apply_patch" && path && existsSync(path) ? safeRead(path) : null;
     const result = await executeTools(tc, projectRoot, client);
-    const failed = /^Error[:\s]/i.test(result);
+    const failed = isToolFailure(result);
 
     let content: ToolCallContent[];
     if (kind === "edit" && name !== "apply_patch" && path && !failed) {
@@ -363,10 +364,15 @@ export class AcpAgent {
         }
         loopRefusals = 0;
 
+        let roundHadToolFailure = false;
         for (const tc of pendingToolCalls) {
           if (state.cancelled) return { stopReason: "cancelled" as StopReason };
           const result = await this.runTool(params.sessionId, state.projectRoot, client, tc, perms, sessionApproved);
+          if (isToolFailure(result)) roundHadToolFailure = true;
           state.messages.push({ role: "tool", content: result.slice(0, 20_000), tool_call_id: tc.id });
+        }
+        if (roundHadToolFailure) {
+          state.messages.push({ role: "system", content: TOOL_FAILURE_FOCUS_HINT });
         }
         continue;
       }
