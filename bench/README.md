@@ -33,7 +33,7 @@ Needs auth: `klaatai login` first, or `KLAATAI_API_KEY=...`.
 The report JSON is written incrementally after every task — a mid-suite abort
 (daily quota, ctrl-c) still leaves a usable partial report (`"complete": false`).
 
-## Tasks (33)
+## Tasks (34)
 
 Each task is a self-contained fixture dir with failing tests the agent must make
 pass **without editing the test file**. Categories:
@@ -41,12 +41,12 @@ pass **without editing the test file**. Categories:
 | category | count | what it exercises |
 |----------|-------|-------------------|
 | `bugfix` | 11 | find + fix a planted bug (off-by-one, mutation, async ordering, float money, regex escaping, unicode, shallow copy, state machine, …) |
-| `implement` | 13 | implement a function/class from a stub + spec comment (LRU cache, event emitter, query string, JSON pointer, expression evaluator, …) |
+| `implement` | 14 | implement a function/class from a stub + spec comment (LRU cache, event emitter, query string, JSON pointer, expression evaluator, …) |
 | `multi-file` | 3 | the failing test is not where the fix is — cross-file navigation (implement imported module, bug in dependency, missing export) |
 | `refactor` | 1 | behavior-preserving API change (callback → Promise) |
 | `long-context` | 5 | large ~30-file fixtures where navigation is the task: cross-module bug hunts, a wide mechanical fix across 8 feature modules, stale cache keys, wrong metric arguments, config precedence — exercises code-graph/search efficiency |
 
-Difficulty spread: 10 easy · 18 medium · 5 hard.
+Difficulty spread: 11 easy · 18 medium · 5 hard.
 
 ## Suite integrity — selfcheck (run after any task change)
 
@@ -88,7 +88,7 @@ later with `--from`), never counted as failures.
 
 When `cursor-agent` (headless CLI) is unusable, `cursor-ide-bench.ts` runs the
 lane through the Cursor IDE's own agent chat: `prepare` builds a workspace of
-all 33 tasks plus a paste-prompt and an objective `run-check.sh` referee;
+all suite tasks plus a paste-prompt and an objective `run-check.sh` referee;
 `import --cost <usd> --tokens <n>` converts the results (cost/tokens from the
 Cursor dashboard's on-demand usage delta) into a normal report JSON, tagged
 with its single-session methodology.

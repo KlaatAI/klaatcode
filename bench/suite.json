@@ -233,6 +233,13 @@
       "prompt": "Environment overrides are supposed to beat file config, which beats defaults \u2014 but overrides are being ignored somewhere in this codebase. Trace the config pipeline and fix it so the tests in src/config.test.ts pass. Do not edit the test file.",
       "difficulty": "hard",
       "category": "long-context"
+    },
+    {
+      "id": "implement-hex-color",
+      "dir": "tasks/implement-hex-color",
+      "prompt": "Implement parseHexColor in src/color.ts (spec in the file comments) so the tests in src/color.test.ts pass. Do not edit the test file.",
+      "difficulty": "easy",
+      "category": "implement"
     }
   ]
 }
