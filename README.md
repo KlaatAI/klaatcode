@@ -283,10 +283,12 @@ Three-layer model — safe read-only tools run silently; everything else asks:
 
 Full MCP client, both transports:
 
-- **stdio** — local servers, configured in `.klaatai/mcp.json`, built-in presets (filesystem, GitHub, Postgres, Puppeteer, Brave Search, Fetch, …)
+- **stdio** — local servers, configured in `.klaatai/mcp.json`, built-in presets (filesystem, GitHub, Git, Postgres, SQLite, Puppeteer, Brave Search, Agent Memory)
 - **Streamable HTTP** — remote servers via `"url"` config or `/mcp add <url>`; SSE and JSON responses, session management, and **OAuth 2.1** (discovery + dynamic client registration + PKCE browser flow) when the server requires auth — tokens cached in `~/.klaatai/mcp-oauth.json`
 
 Manage live with `/mcp`.
+
+**Persistent memory across sessions.** `/mcp enable agentmemory` wires up [agentmemory](https://github.com/rohitg00/agentmemory), a local memory server that remembers architectural decisions, project conventions, and debugging findings between sessions. It complements the built-in `/memory` distillation rather than replacing it. Start the server with `npx @agentmemory/agentmemory start`, then either enable the preset above or run `agentmemory connect klaatcode --with-hooks`, which additionally installs lifecycle hooks into `~/.klaatai/hooks.json` for automatic capture. Everything is opt-in, and both the hooks and the MCP tools fail open when the server isn't running. As with any `npx`-based preset, the first connect on a new machine spends a while downloading the package before the server answers; it connects in the background, so keep working and the tools appear when it's ready.
 
 ### Git Integration
 
@@ -324,7 +326,7 @@ Run shell commands on agent lifecycle events. Hooks receive a JSON payload on st
 }
 ```
 
-Events: `before_message` · `after_message` · `before_tool` · `after_tool`
+Events: `session_start` · `before_message` · `after_message` · `before_tool` · `after_tool` · `session_end`
 
 ### Project Rules
 
