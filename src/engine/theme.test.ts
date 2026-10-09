@@ -3,6 +3,7 @@ import {
   THEME_DESCRIPTIONS,
   THEME_NAMES,
   TOKYO_NIGHT_PALETTE,
+  ROSE_PINE_PALETTE,
   getPalette,
 } from "./theme.js";
 
@@ -38,5 +39,38 @@ describe("Tokyo Night theme", () => {
       expect(color).toMatch(/^#[0-9a-f]{6}$/i);
     }
     expect(TOKYO_NIGHT_PALETTE.bg).toBeNull();
+  });
+});
+
+describe("Rosé Pine theme", () => {
+  test("is registered with its description and palette", () => {
+    expect(THEME_NAMES).toContain("rose-pine");
+    expect(THEME_DESCRIPTIONS["rose-pine"]).toContain("Rosé Pine");
+    expect(getPalette("rose-pine")).toBe(ROSE_PINE_PALETTE);
+  });
+
+  test("uses valid 256-color slots", () => {
+    const numericSlots = Object.values(ROSE_PINE_PALETTE)
+      .filter((value): value is number => typeof value === "number");
+
+    expect(numericSlots.length).toBeGreaterThan(0);
+    for (const color of numericSlots) {
+      expect(Number.isInteger(color)).toBe(true);
+      expect(color).toBeGreaterThanOrEqual(0);
+      expect(color).toBeLessThanOrEqual(255);
+    }
+  });
+
+  test("uses supported hex colors and the terminal background", () => {
+    for (const color of [
+      ROSE_PINE_PALETTE.accent,
+      ROSE_PINE_PALETTE.dimText,
+      ROSE_PINE_PALETTE.userColor,
+      ROSE_PINE_PALETTE.border,
+      ROSE_PINE_PALETTE.thumb,
+    ]) {
+      expect(color).toMatch(/^#[0-9a-f]{6}$/i);
+    }
+    expect(ROSE_PINE_PALETTE.bg).toBeNull();
   });
 });
