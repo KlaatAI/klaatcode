@@ -36,6 +36,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { pathToFileURL } from "node:url";
 import type { ToolDefinition } from "../api/client.js";
 import { storedMcpToken, refreshMcpToken, authorizeMcpServer } from "./oauth.js";
 import {
@@ -119,6 +120,19 @@ interface JsonRpcResponse {
   id: number;
   result?: unknown;
   error?: { code: number; message: string; data?: unknown };
+}
+
+/** Result shape for MCP ``roots/list`` responses. */
+export function mcpRootsListResult(projectRoot: string = process.cwd()): {
+  roots: { uri: string; name?: string }[];
+} {
+  const uri = pathToFileURL(projectRoot).href;
+  const name = projectRoot.split(/[/\\]/).filter(Boolean).pop();
+  return { roots: [{ uri, ...(name ? { name } : {}) }] };
+}
+
+function isJsonRpcRequest(msg: JsonRpcRequest | JsonRpcResponse): msg is JsonRpcRequest {
+  return typeof (msg as JsonRpcRequest).method === "string";
 }
 
 interface MCPToolSchema {
@@ -391,7 +405,8 @@ export class MCPServerClient {
 
   /**
    * Read an SSE body until the JSON-RPC response matching `id` arrives.
-   * Server-initiated requests/notifications on the stream are ignored.
+   * Server-initiated requests on the stream are answered inline; unrelated
+   * responses are ignored until the matching id is seen.
    */
   private async _readSSEResponse(res: Response, id: number, method: string): Promise<unknown> {
     if (!res.body) throw new Error(`empty SSE body (${method})`);
@@ -407,11 +422,16 @@ export class MCPServerClient {
         .map(l => l.slice(5).trimStart())
         .join("\n");
       if (!data) return undefined;
-      let msg: JsonRpcResponse;
-      try { msg = JSON.parse(data) as JsonRpcResponse; } catch { return undefined; }
-      if (msg.id !== id) return undefined; // server-initiated message — ignore
-      if (msg.error) throw new Error(`[${msg.error.code}] ${msg.error.message}`);
-      return { result: msg.result };
+      let msg: JsonRpcRequest | JsonRpcResponse;
+      try { msg = JSON.parse(data) as JsonRpcRequest | JsonRpcResponse; } catch { return undefined; }
+      if (isJsonRpcRequest(msg) && typeof msg.id === "number") {
+        this._handleServerRequest(msg);
+        return undefined;
+      }
+      const resp = msg as JsonRpcResponse;
+      if (resp.id !== id) return undefined; // unrelated response — keep reading
+      if (resp.error) throw new Error(`[${resp.error.code}] ${resp.error.message}`);
+      return { result: resp.result };
     };
 
     try {
@@ -456,8 +476,12 @@ export class MCPServerClient {
       const t = raw.trim();
       if (!t) continue;
       try {
-        const msg = JSON.parse(t) as JsonRpcResponse;
+        const msg = JSON.parse(t) as JsonRpcRequest | JsonRpcResponse;
         if (typeof msg.id !== "number") continue; // ignore notifications from server
+        if (isJsonRpcRequest(msg)) {
+          this._handleServerRequest(msg);
+          continue;
+        }
         const p = this._pending.get(msg.id);
         if (!p) continue;
         this._pending.delete(msg.id);
@@ -469,6 +493,38 @@ export class MCPServerClient {
         }
       } catch { /* skip malformed JSON line */ }
     }
+  }
+
+  private _handleServerRequest(req: JsonRpcRequest): void {
+    if (typeof req.id !== "number") return;
+    if (req.method === "roots/list") {
+      this._respondToServer(req.id, mcpRootsListResult());
+      return;
+    }
+    this._respondToServer(req.id, undefined, {
+      code: -32601,
+      message: `Method not found: ${req.method}`,
+    });
+  }
+
+  private _respondToServer(
+    id: number,
+    result?: unknown,
+    error?: { code: number; message: string; data?: unknown },
+  ): void {
+    const payload = error
+      ? { jsonrpc: "2.0" as const, id, error }
+      : { jsonrpc: "2.0" as const, id, result };
+    if (this.isRemote) {
+      void fetch(this._config.url!, {
+        method: "POST",
+        headers: this._httpHeaders(),
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(15_000),
+      }).catch(() => { /* best effort */ });
+      return;
+    }
+    this._write(payload);
   }
 
   private _request(method: string, params: unknown): Promise<unknown> {
