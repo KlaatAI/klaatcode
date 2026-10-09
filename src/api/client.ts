@@ -109,6 +109,8 @@ export interface LifetimeUsageStats {
   total_tokens: number;
   total_cost_usd: number;
   by_tier: Record<string, TierUsage>;
+  /** Subscription plan when the backend exposes it on /v1/me/usage. */
+  plan?: string;
 }
 
 export interface ClientOptions {
@@ -532,7 +534,8 @@ export class KlaatAIClient {
         res = await fetch(`${this.baseUrl}/v1/me/usage`, { headers: this.headers() });
       }
       if (!res.ok) return null;
-      return res.json() as Promise<LifetimeUsageStats>;
+      const data = await res.json() as LifetimeUsageStats & { plan?: string };
+      return KlaatAIClient.mergeUsagePlan(res.headers, data);
     } catch {
       return null;
     }
@@ -833,6 +836,18 @@ export class KlaatAIClient {
       if (Number.isFinite(ra) && ra > 0) return Math.round(ra * 1000);
     }
     return null;
+  }
+
+  /**
+   * Attach subscription plan from quota headers or JSON body to usage stats.
+   * Header wins when both are present (matches chat completion behavior).
+   */
+  static mergeUsagePlan(
+    h: Headers,
+    data: LifetimeUsageStats & { plan?: string },
+  ): LifetimeUsageStats {
+    const plan = KlaatAIClient.parseQuotaHeaders(h)?.plan ?? data.plan;
+    return plan ? { ...data, plan } : data;
   }
 
   /**

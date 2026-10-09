@@ -142,3 +142,48 @@ test("chatStream: unreachable host yields an error chunk instead of throwing", a
     globalThis.fetch = realFetch;
   }
 });
+
+test("mergeUsagePlan: reads plan from quota headers", () => {
+  const data = {
+    total_requests: 3,
+    prompt_tokens: 10,
+    completion_tokens: 5,
+    total_tokens: 15,
+    total_cost_usd: 0.01,
+    by_tier: {},
+  };
+  const stats = KlaatAIClient.mergeUsagePlan(
+    new Headers({ "X-KlaatAI-Quota-Plan": "pro" }),
+    data,
+  );
+  expect(stats.plan).toBe("pro");
+});
+
+test("mergeUsagePlan: reads plan from JSON body when headers omit it", () => {
+  const stats = KlaatAIClient.mergeUsagePlan(new Headers(), {
+    total_requests: 1,
+    prompt_tokens: 0,
+    completion_tokens: 0,
+    total_tokens: 0,
+    total_cost_usd: 0,
+    by_tier: {},
+    plan: "free",
+  });
+  expect(stats.plan).toBe("free");
+});
+
+test("mergeUsagePlan: header plan wins over JSON body", () => {
+  const stats = KlaatAIClient.mergeUsagePlan(
+    new Headers({ "X-KlaatAI-Quota-Plan": "pro" }),
+    {
+      total_requests: 1,
+      prompt_tokens: 0,
+      completion_tokens: 0,
+      total_tokens: 0,
+      total_cost_usd: 0,
+      by_tier: {},
+      plan: "free",
+    },
+  );
+  expect(stats.plan).toBe("pro");
+});

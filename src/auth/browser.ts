@@ -205,6 +205,7 @@ export async function startOAuthBrowserAuth(
           expiresAt:    Math.floor(Date.now() / 1000) + expiresIn,
           userId:       url.searchParams.get("user_id") ?? undefined,
           email:        url.searchParams.get("email") ?? undefined,
+          plan:         url.searchParams.get("plan") ?? undefined,
         } : null);
         return;
       }

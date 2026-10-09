@@ -19,6 +19,7 @@ type Creds = { accessToken?: string | null; email?: string | null; plan?: string
 let mockToken: string | null = null;
 let mockCreds: Creds = {};
 let pingImpl: () => Promise<{ status: string }>;
+let usageImpl: () => Promise<{ plan?: string } | null>;
 
 mock.module("../auth/credentials.js", () => ({
   ...realCredentials,
@@ -35,6 +36,7 @@ mock.module("../api/client.js", () => ({
   KlaatAIClient: class extends realClient.KlaatAIClient {
     constructor() { super({ baseUrl: "http://mock.invalid" }); }
     override async ping(): Promise<{ status: string }> { return pingImpl(); }
+    override async getUsageStats() { return usageImpl(); }
   },
 }));
 
@@ -53,6 +55,7 @@ let origErr: typeof console.error;
 beforeEach(() => {
   mockToken = null;
   mockCreds = {};
+  usageImpl = async () => null;
   stdout = [];
   stderr = [];
   origLog = console.log;
@@ -80,6 +83,7 @@ describe("runWhoami (json: false)", () => {
     mockToken = "jwt-abc";
     mockCreds = { accessToken: "jwt-abc", email: "demo@klaatai.com", plan: "pro" };
     pingImpl = async () => ({ status: "ok" });
+    usageImpl = async () => ({ plan: "pro", total_requests: 1, prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, total_cost_usd: 0, by_tier: {} });
     await runWhoami("http://127.0.0.1:8765", false);
     const blob = jsonOut();
     expect(blob).toContain("demo@klaatai.com");
@@ -87,6 +91,15 @@ describe("runWhoami (json: false)", () => {
     expect(blob).toContain("subscription (JWT)");
     expect(blob.toLowerCase()).toContain("online");
     expect(errOut()).toBe("");
+  });
+
+  test("authenticated + live usage plan shown when credentials omit plan", async () => {
+    mockToken = "jwt-abc";
+    mockCreds = { accessToken: "jwt-abc", email: "demo@klaatai.com" };
+    pingImpl = async () => ({ status: "ok" });
+    usageImpl = async () => ({ plan: "pro", total_requests: 1, prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, total_cost_usd: 0, by_tier: {} });
+    await runWhoami("http://127.0.0.1:8765", false);
+    expect(jsonOut()).toContain("pro");
   });
 
   test("authenticated but API unreachable → writes error to stderr", async () => {
@@ -114,6 +127,7 @@ describe("runWhoami (json: true)", () => {
     mockToken = "jwt-abc";
     mockCreds = { accessToken: "jwt-abc", email: "demo@klaatai.com", plan: "pro" };
     pingImpl = async () => ({ status: "ok" });
+    usageImpl = async () => ({ plan: "pro", total_requests: 1, prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, total_cost_usd: 0, by_tier: {} });
     await runWhoami("http://127.0.0.1:8765", true);
     const obj = parse(jsonOut());
     expect(obj.signedIn).toBe(true);
@@ -121,6 +135,16 @@ describe("runWhoami (json: true)", () => {
     expect(obj.plan).toBe("pro");
     expect(obj.backend).toBe("online");
     expect(errOut()).toBe("");
+  });
+
+  test("authenticated + live usage plan overrides stale stored plan", async () => {
+    mockToken = "jwt-abc";
+    mockCreds = { accessToken: "jwt-abc", email: "demo@klaatai.com", plan: "free" };
+    pingImpl = async () => ({ status: "ok" });
+    usageImpl = async () => ({ plan: "pro", total_requests: 1, prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, total_cost_usd: 0, by_tier: {} });
+    await runWhoami("http://127.0.0.1:8765", true);
+    const obj = parse(jsonOut());
+    expect(obj.plan).toBe("pro");
   });
 
   test("authenticated + backend offline → online:false schema on stderr", async () => {

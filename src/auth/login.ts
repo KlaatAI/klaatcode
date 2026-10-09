@@ -28,19 +28,23 @@ export async function runWhoami(baseUrl: string, json = false): Promise<void> {
   }
   const client = new KlaatAIClient({ apiKey: token, baseUrl });
   try {
-    const info = await client.ping();
+    const [info, usage] = await Promise.all([
+      client.ping(),
+      client.getUsageStats(),
+    ]);
     const creds = loadCredentials();
+    const plan = usage?.plan ?? creds.plan ?? null;
     if (json) {
       console.log(JSON.stringify({
         signedIn: true,
         email: creds.email ?? null,
-        plan: creds.plan ?? null,
+        plan,
         backend: info.status === "ok" ? "online" : "offline",
       }, null, 2));
     } else {
       console.log();
       if (creds.email) console.log(chalk.bold("  Account:  ") + creds.email);
-      if (creds.plan)  console.log(chalk.bold("  Plan:     ") + creds.plan);
+      if (plan)  console.log(chalk.bold("  Plan:     ") + plan);
       console.log(chalk.bold("  Session:  ") + "subscription (JWT)");
       console.log(chalk.bold("  Backend:  ") + (info.status === "ok" ? chalk.green("Online") : chalk.red("Offline")));
       console.log();
